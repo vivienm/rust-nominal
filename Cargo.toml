@@ -8,8 +8,8 @@ documentation = "https://vivienm.github.io/rust-nominal/docs/nominal/"
 license = "MIT"
 
 [features]
-confirm = ["dep:dialoguer"]
 ansi = ["dep:lscolors", "dep:nu-ansi-term"]
+confirm = ["dep:dialoguer"]
 unicode = ["dep:icu_collator"]
 
 [dependencies]
