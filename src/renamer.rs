@@ -54,13 +54,13 @@ impl<S, T> Renamer<S, T> {
     }
 }
 
-impl<S, T> Renamer<S, T> {
+impl<S, T> Renamer<S, T>
+where
+    S: AsRef<Path>,
+    T: AsRef<Path>,
+{
     /// Consumes the renamer and returns a [`Plan`].
-    pub fn plan(self) -> Result<Plan<S, T>, PlanError>
-    where
-        S: AsRef<Path>,
-        T: AsRef<Path>,
-    {
+    pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
         let mut renames = self.renames;
 
         // Sort the renames by target path.
