@@ -62,6 +62,7 @@ where
     /// Consumes the renamer and returns a [`Plan`].
     pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
         let mut renames = self.renames;
+        renames.retain(|r| r.source.as_ref() != r.target.as_ref());
 
         // Sort the renames by target path.
         #[cfg(feature = "unicode")]
