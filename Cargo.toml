@@ -6,6 +6,7 @@ description = "A Rust library for batch file renaming."
 repository = "https://github.com/vivienm/rust-nominal"
 documentation = "https://vivienm.github.io/rust-nominal/docs/nominal/"
 license = "MIT"
+publish = false
 
 [features]
 ansi = ["dep:lscolors", "dep:nu-ansi-term"]
