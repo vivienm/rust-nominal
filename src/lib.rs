@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! A Rust library for batch file renaming.
 //!
 //! [Repository]

@@ -1,17 +1,17 @@
 # Changes here will be overwritten by Copier. NEVER EDIT MANUALLY.
 
-_commit: 56e8180
+_commit: 2ee2c93
 _src_path: https://github.com/vivienm/copier-rust
-author_name: Vivien Maisonneuve
 copyright_holder: Vivien Maisonneuve
 copyright_year: 2024
-github_account: vivienm
+forge: github
 github_pages: true
-hosting_platform: github
+github_repo: rust-nominal
+github_user: vivienm
 license: MIT
 package_name: nominal
 project_description: A Rust library for batch file renaming.
 project_name: nominal
 project_type: library
-repo_name: rust-nominal
 rust_toolchain: stable
+user_name: Vivien Maisonneuve

@@ -1,7 +1,12 @@
+set shell := ["bash", "-uc"]
+
 ci: fmt clippy test doc audit typos
 
 fmt:
   cargo fmt --check
+
+check *args="":
+  cargo check --all-targets --all-features {{args}}
 
 clippy *args="":
   cargo clippy --all-targets --all-features {{args}}
