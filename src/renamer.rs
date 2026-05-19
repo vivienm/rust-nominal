@@ -272,11 +272,7 @@ mod tests {
         renamer.add("b", "c");
 
         let plan = renamer.plan().expect("acyclic chain should plan");
-        let order: Vec<_> = plan
-            .renames
-            .iter()
-            .map(|r| (r.source, r.target))
-            .collect();
+        let order: Vec<_> = plan.renames.iter().map(|r| (r.source, r.target)).collect();
         assert_eq!(order, vec![("b", "c"), ("a", "b")]);
     }
 
