@@ -83,6 +83,11 @@ where
     }
 
     /// Executes the rename operation.
+    ///
+    /// The target is checked for existence before renaming to avoid
+    /// overwriting it. This check and the rename itself are not atomic:
+    /// a concurrent process creating the target between the two calls
+    /// can still be overwritten.
     pub fn apply(&self) -> Result<(), ApplyError> {
         let source = self.source.as_ref();
         let target = self.target.as_ref();

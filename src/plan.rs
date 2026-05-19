@@ -109,6 +109,13 @@ where
 
     /// Executes the plan.
     ///
+    /// Each rename checks that its target does not exist before proceeding,
+    /// but this check is not atomic with the rename itself: a concurrent
+    /// process creating the target in between can still be overwritten.
+    ///
+    /// If a rename fails partway through, the operations applied so far are
+    /// not rolled back.
+    ///
     /// # Examples
     ///
     /// ```
