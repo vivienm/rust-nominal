@@ -67,9 +67,18 @@ where
         let mut renames = self.renames;
         renames.retain(|r| r.source.as_ref() != r.target.as_ref());
 
-        let mut seen = HashSet::with_capacity(renames.len());
+        let mut seen_sources = HashSet::with_capacity(renames.len());
         for rename in &renames {
-            if !seen.insert(rename.target.as_ref()) {
+            if !seen_sources.insert(rename.source.as_ref()) {
+                return Err(PlanError::DuplicateSource {
+                    source_path: rename.source.as_ref().to_path_buf(),
+                });
+            }
+        }
+
+        let mut seen_targets = HashSet::with_capacity(renames.len());
+        for rename in &renames {
+            if !seen_targets.insert(rename.target.as_ref()) {
                 return Err(PlanError::DuplicateTarget {
                     target: rename.target.as_ref().to_path_buf(),
                 });
@@ -214,6 +223,20 @@ mod tests {
 
     use super::Renamer;
     use crate::error::PlanError;
+
+    #[test]
+    fn duplicate_source_is_rejected() {
+        let mut renamer = Renamer::new();
+        renamer.add("a", "b");
+        renamer.add("a", "c");
+
+        match renamer.plan() {
+            Err(PlanError::DuplicateSource { source_path }) => {
+                assert_eq!(source_path, PathBuf::from("a"));
+            }
+            other => panic!("expected DuplicateSource, got {:?}", other),
+        }
+    }
 
     #[test]
     fn duplicate_target_is_rejected() {

@@ -21,6 +21,12 @@ pub enum PlanError {
     /// The ICU collator could not be created.
     #[error("could not create collator: {0}")]
     IcuCollator(#[from] icu_collator::Error),
+    /// Multiple rename operations share the same source path.
+    #[error("multiple targets map from source {source_path:?}")]
+    DuplicateSource {
+        /// The source path that has more than one target.
+        source_path: PathBuf,
+    },
     /// Multiple rename operations share the same target path.
     #[error("multiple sources map to target {target:?}")]
     DuplicateTarget {
