@@ -100,8 +100,8 @@ where
             fn compare_paths(collator: &Collator, p1: &Path, p2: &Path) -> Ordering {
                 use std::os::windows::ffi::OsStrExt;
 
-                let p1: Vec<u16> = p1.as_os_str().collect();
-                let p2: Vec<u16> = p2.as_os_str().collect();
+                let p1: Vec<u16> = p1.as_os_str().encode_wide().collect();
+                let p2: Vec<u16> = p2.as_os_str().encode_wide().collect();
                 collator.compare_utf16(&p1, &p2)
             }
 
