@@ -96,21 +96,25 @@ where
         {
             use std::cmp::Ordering;
 
-            use icu_collator::{Collator, CollatorOptions};
+            use icu_collator::{
+                Collator, CollatorBorrowed, CollatorPreferences,
+                options::CollatorOptions,
+                preferences::CollationNumericOrdering,
+            };
 
-            let mut collator_opts = CollatorOptions::new();
-            collator_opts.numeric = Some(icu_collator::Numeric::On);
-            let collator = Collator::try_new(Default::default(), collator_opts)?;
+            let mut prefs = CollatorPreferences::default();
+            prefs.numeric_ordering = Some(CollationNumericOrdering::True);
+            let collator = Collator::try_new(prefs, CollatorOptions::default())?;
 
             #[cfg(unix)]
-            fn compare_paths(collator: &Collator, p1: &Path, p2: &Path) -> Ordering {
+            fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
                 use std::os::unix::ffi::OsStrExt;
 
                 collator.compare_utf8(p1.as_os_str().as_bytes(), p2.as_os_str().as_bytes())
             }
 
             #[cfg(windows)]
-            fn compare_paths(collator: &Collator, p1: &Path, p2: &Path) -> Ordering {
+            fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
                 use std::os::windows::ffi::OsStrExt;
 
                 let p1: Vec<u16> = p1.as_os_str().encode_wide().collect();

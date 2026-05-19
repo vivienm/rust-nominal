@@ -18,10 +18,10 @@ pub enum Error {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlanError {
-    /// The ICU collator could not be created.
+    /// An ICU error occurred while preparing the collator.
     #[cfg(feature = "unicode")]
-    #[error("could not create collator: {0}")]
-    IcuCollator(#[from] icu_collator::Error),
+    #[error("ICU error: {0}")]
+    Icu(#[from] icu_provider::DataError),
     /// Multiple rename operations share the same source path.
     #[error("multiple targets map from source {path:?}")]
     DuplicateSource {
