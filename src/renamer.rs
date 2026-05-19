@@ -127,6 +127,32 @@ where
     }
 }
 
+impl<S, T> Default for Renamer<S, T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S, T> FromIterator<(S, T)> for Renamer<S, T> {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (S, T)>,
+    {
+        Self {
+            renames: iter.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl<S, T> Extend<(S, T)> for Renamer<S, T> {
+    fn extend<I>(&mut self, iter: I)
+    where
+        I: IntoIterator<Item = (S, T)>,
+    {
+        self.renames.extend(iter.into_iter().map(Into::into));
+    }
+}
+
 /// Reorders renames so that each operation runs after any other operation
 /// whose target is its source (which must vacate that path first). Returns
 /// [`PlanError::Cycle`] if no such ordering exists.
@@ -189,32 +215,6 @@ where
     }
 
     Ok(())
-}
-
-impl<S, T> Default for Renamer<S, T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<S, T> FromIterator<(S, T)> for Renamer<S, T> {
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = (S, T)>,
-    {
-        Self {
-            renames: iter.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
-impl<S, T> Extend<(S, T)> for Renamer<S, T> {
-    fn extend<I>(&mut self, iter: I)
-    where
-        I: IntoIterator<Item = (S, T)>,
-    {
-        self.renames.extend(iter.into_iter().map(Into::into));
-    }
 }
 
 #[cfg(test)]
