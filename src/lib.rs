@@ -35,7 +35,7 @@ mod plan;
 mod renamer;
 
 pub use self::{
-    error::{ApplyError, ApplyErrorDetails, Error, PlanError},
+    error::{ApplyError, Error, PlanError, RenameError},
     plan::Plan,
     renamer::Renamer,
 };

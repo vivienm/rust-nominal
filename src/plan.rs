@@ -149,10 +149,10 @@ where
     /// ```
     pub fn apply(self) -> Result<(), ApplyError> {
         for (applied, rename) in self.renames.iter().enumerate() {
-            rename.apply().map_err(|details| ApplyError {
-                source: rename.source.as_ref().to_path_buf(),
-                target: rename.target.as_ref().to_path_buf(),
-                details,
+            rename.apply().map_err(|source| ApplyError {
+                source_path: rename.source.as_ref().to_path_buf(),
+                target_path: rename.target.as_ref().to_path_buf(),
+                source,
                 applied,
             })?;
         }
@@ -186,7 +186,7 @@ mod tests {
             .apply()
             .expect_err("second rename should fail");
         assert_eq!(err.applied, 1);
-        assert_eq!(err.source, dir.join("c"));
-        assert_eq!(err.target, dir.join("d"));
+        assert_eq!(err.source_path, dir.join("c"));
+        assert_eq!(err.target_path, dir.join("d"));
     }
 }

@@ -1,7 +1,7 @@
 use std::{fmt, fs, path::Path};
 
 use crate::{
-    error::ApplyErrorDetails,
+    error::RenameError,
     fsutil::{common_ancestor, path_exists},
 };
 
@@ -88,13 +88,13 @@ where
     /// overwriting it. This check and the rename itself are not atomic:
     /// a concurrent process creating the target between the two calls
     /// can still be overwritten.
-    pub fn apply(&self) -> Result<(), ApplyErrorDetails> {
+    pub fn apply(&self) -> Result<(), RenameError> {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
 
         // We check before renaming to avoid overwriting the target.
         if path_exists(target)? {
-            return Err(ApplyErrorDetails::TargetExists);
+            return Err(RenameError::TargetExists);
         }
 
         if let Some(target_parent) = target.parent()

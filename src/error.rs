@@ -44,25 +44,24 @@ pub enum PlanError {
 
 /// The error type returned from [`Plan::apply`](crate::plan::Plan::apply).
 #[derive(Debug, Error)]
-#[error("failed to rename {source:?} to {target:?}: {details}")]
+#[error("failed to rename {source_path:?} to {target_path:?}: {source}")]
 #[non_exhaustive]
 pub struct ApplyError {
     /// The source path of the rename operation.
-    pub source: PathBuf,
+    pub source_path: PathBuf,
     /// The target path of the rename operation.
-    pub target: PathBuf,
-    /// The details of the error.
-    #[source]
-    pub details: ApplyErrorDetails,
+    pub target_path: PathBuf,
+    /// The underlying rename error.
+    pub source: RenameError,
     /// The number of rename operations successfully applied before this
     /// failure.
     pub applied: usize,
 }
 
-/// The details of an [`ApplyError`].
+/// An error from a single rename operation.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum ApplyErrorDetails {
+pub enum RenameError {
     /// The target path already exists.
     #[error("target already exists")]
     TargetExists,
