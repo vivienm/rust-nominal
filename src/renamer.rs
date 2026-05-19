@@ -173,12 +173,13 @@ where
         .collect();
 
     let mut indegree = vec![0usize; n];
-    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // Each rename has a single source, so at most one outgoing edge.
+    let mut successor: Vec<Option<usize>> = vec![None; n];
     for (i, rename) in renames.iter().enumerate() {
         if let Some(&j) = target_to_idx.get(rename.source.as_ref()) {
             // Op j wants to write to a path (T_j = S_i) that op i still reads
             // from. Op i must move it out of the way first: edge i -> j.
-            successors[i].push(j);
+            successor[i] = Some(j);
             indegree[j] += 1;
         }
     }
@@ -191,7 +192,7 @@ where
     while let Some(i) = queue.pop_front() {
         dest[i] = placed;
         placed += 1;
-        for &j in &successors[i] {
+        if let Some(j) = successor[i] {
             indegree[j] -= 1;
             if indegree[j] == 0 {
                 queue.push_back(j);
