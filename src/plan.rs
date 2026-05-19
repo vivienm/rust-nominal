@@ -149,9 +149,11 @@ where
     /// ```
     pub fn apply(self) -> Result<(), ApplyError> {
         for (applied, rename) in self.renames.iter().enumerate() {
-            rename.apply().map_err(|mut err| {
-                err.applied = applied;
-                err
+            rename.apply().map_err(|details| ApplyError {
+                source: rename.source.as_ref().to_path_buf(),
+                target: rename.target.as_ref().to_path_buf(),
+                details,
+                applied,
             })?;
         }
         Ok(())

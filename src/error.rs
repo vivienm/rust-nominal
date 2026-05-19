@@ -59,33 +59,6 @@ pub struct ApplyError {
     pub applied: usize,
 }
 
-impl ApplyError {
-    pub(crate) fn new(
-        source: impl Into<PathBuf>,
-        target: impl Into<PathBuf>,
-        details: ApplyErrorDetails,
-    ) -> Self {
-        Self {
-            source: source.into(),
-            target: target.into(),
-            details,
-            applied: 0,
-        }
-    }
-
-    pub(crate) fn target_exists(source: impl Into<PathBuf>, target: impl Into<PathBuf>) -> Self {
-        Self::new(source, target, ApplyErrorDetails::TargetExists)
-    }
-
-    pub(crate) fn from_io(
-        from: impl Into<PathBuf>,
-        to: impl Into<PathBuf>,
-        source: io::Error,
-    ) -> Self {
-        Self::new(from, to, ApplyErrorDetails::Io(source))
-    }
-}
-
 /// The details of an [`ApplyError`].
 #[derive(Debug, Error)]
 #[non_exhaustive]
