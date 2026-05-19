@@ -97,8 +97,7 @@ where
             use std::cmp::Ordering;
 
             use icu_collator::{
-                Collator, CollatorBorrowed, CollatorPreferences,
-                options::CollatorOptions,
+                Collator, CollatorBorrowed, CollatorPreferences, options::CollatorOptions,
                 preferences::CollationNumericOrdering,
             };
 
