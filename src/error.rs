@@ -44,6 +44,7 @@ pub enum PlanError {
 
 /// The error type returned from [`Plan::apply`](crate::plan::Plan::apply).
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct ApplyError {
     /// The source path of the rename operation.
     pub source: PathBuf,
