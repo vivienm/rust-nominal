@@ -60,16 +60,23 @@ where
 
     #[cfg(feature = "ansi")]
     /// Writes the plan to the specified writer, with ANSI colors.
-    pub fn write_colored_to<W>(&self, writer: &mut W) -> io::Result<()>
+    ///
+    /// To color paths using the `LS_COLORS` environment variable:
+    ///
+    /// ```ignore
+    /// let ls_colors = lscolors::LsColors::from_env().unwrap_or_default();
+    /// plan.write_colored_to(&mut std::io::stdout(), &ls_colors)?;
+    /// ```
+    pub fn write_colored_to<W>(
+        &self,
+        writer: &mut W,
+        ls_colors: &lscolors::LsColors,
+    ) -> io::Result<()>
     where
         W: io::Write,
     {
-        let ls_colors = lscolors::LsColors::from_env().unwrap_or_else(|| {
-            tracing::warn!("could not read LS_COLORS environment variable");
-            lscolors::LsColors::default()
-        });
         for rename in &self.renames {
-            rename.write_colored_to(&ls_colors, writer)?;
+            rename.write_colored_to(writer, ls_colors)?;
         }
         Ok(())
     }

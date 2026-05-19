@@ -34,8 +34,8 @@ where
     #[cfg(feature = "ansi")]
     pub fn write_colored_to<W>(
         &self,
-        ls_colors: &lscolors::LsColors,
         w: &mut W,
+        ls_colors: &lscolors::LsColors,
     ) -> std::io::Result<()>
     where
         W: std::io::Write,
