@@ -5,6 +5,7 @@ use thiserror::Error;
 /// The general error type for this crate.
 #[derive(Debug, Error)]
 #[error(transparent)]
+#[non_exhaustive]
 pub enum Error {
     /// A plan error.
     Plan(#[from] PlanError),
