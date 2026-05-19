@@ -17,8 +17,8 @@ pub enum Error {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlanError {
-    #[cfg(feature = "unicode")]
     /// The ICU collator could not be created.
+    #[cfg(feature = "unicode")]
     #[error("could not create collator: {0}")]
     IcuCollator(#[from] icu_collator::Error),
     /// Multiple rename operations share the same source path.

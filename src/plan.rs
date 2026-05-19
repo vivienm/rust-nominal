@@ -58,7 +58,6 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "ansi")]
     /// Writes the plan to the specified writer, with ANSI colors.
     ///
     /// To color paths using the `LS_COLORS` environment variable:
@@ -67,6 +66,7 @@ where
     /// let ls_colors = lscolors::LsColors::from_env().unwrap_or_default();
     /// plan.write_colored_to(&mut std::io::stdout(), &ls_colors)?;
     /// ```
+    #[cfg(feature = "ansi")]
     pub fn write_colored_to<W>(
         &self,
         writer: &mut W,
