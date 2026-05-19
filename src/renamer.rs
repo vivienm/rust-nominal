@@ -71,7 +71,7 @@ where
         for rename in &renames {
             if !seen_sources.insert(rename.source.as_ref()) {
                 return Err(PlanError::DuplicateSource {
-                    source_path: rename.source.as_ref().to_path_buf(),
+                    path: rename.source.as_ref().to_path_buf(),
                 });
             }
         }
@@ -80,7 +80,7 @@ where
         for rename in &renames {
             if !seen_targets.insert(rename.target.as_ref()) {
                 return Err(PlanError::DuplicateTarget {
-                    target: rename.target.as_ref().to_path_buf(),
+                    path: rename.target.as_ref().to_path_buf(),
                 });
             }
         }
@@ -231,8 +231,8 @@ mod tests {
         renamer.add("a", "c");
 
         match renamer.plan() {
-            Err(PlanError::DuplicateSource { source_path }) => {
-                assert_eq!(source_path, PathBuf::from("a"));
+            Err(PlanError::DuplicateSource { path }) => {
+                assert_eq!(path, PathBuf::from("a"));
             }
             other => panic!("expected DuplicateSource, got {:?}", other),
         }
@@ -245,8 +245,8 @@ mod tests {
         renamer.add("b", "z");
 
         match renamer.plan() {
-            Err(PlanError::DuplicateTarget { target }) => {
-                assert_eq!(target, PathBuf::from("z"));
+            Err(PlanError::DuplicateTarget { path }) => {
+                assert_eq!(path, PathBuf::from("z"));
             }
             other => panic!("expected DuplicateTarget, got {:?}", other),
         }

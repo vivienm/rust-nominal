@@ -22,16 +22,16 @@ pub enum PlanError {
     #[error("could not create collator: {0}")]
     IcuCollator(#[from] icu_collator::Error),
     /// Multiple rename operations share the same source path.
-    #[error("multiple targets map from source {source_path:?}")]
+    #[error("multiple targets map from source {path:?}")]
     DuplicateSource {
         /// The source path that has more than one target.
-        source_path: PathBuf,
+        path: PathBuf,
     },
     /// Multiple rename operations share the same target path.
-    #[error("multiple sources map to target {target:?}")]
+    #[error("multiple sources map to target {path:?}")]
     DuplicateTarget {
         /// The target path that has more than one source.
-        target: PathBuf,
+        path: PathBuf,
     },
     /// The rename operations form a cycle that cannot be resolved with direct
     /// renames alone (e.g. a swap `a <-> b`).
