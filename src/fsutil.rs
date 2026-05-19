@@ -66,14 +66,9 @@ mod tests {
 
         // Create a symbolic link, check that it exists.
         #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&file_path, &link_path)?;
-            assert!(super::path_exists(&link_path)?);
-        }
+        std::os::unix::fs::symlink(&file_path, &link_path)?;
         #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_file(&file_path, &link_path)?;
-        }
+        std::os::windows::fs::symlink_file(&file_path, &link_path)?;
         assert!(super::path_exists(&link_path)?);
 
         // Remove the file, check that the symbolic link still exists.
