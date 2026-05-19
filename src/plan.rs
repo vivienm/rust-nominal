@@ -86,6 +86,10 @@ where
     /// If the plan is empty, this returns [`None`]. Otherwise, it prompts the
     /// user to confirm the plan and returns the user's response.
     ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the prompt cannot be displayed or read.
+    ///
     /// # Examples
     ///
     /// ```
@@ -116,6 +120,11 @@ where
     /// If a rename fails partway through, the operations applied so far are
     /// not rolled back. The number of operations that succeeded is reported
     /// in [`ApplyError::applied`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ApplyError`] if any rename fails. Renames already
+    /// applied are not rolled back.
     ///
     /// # Examples
     ///

@@ -21,9 +21,10 @@ impl<S, T> Renamer<S, T> {
     /// # use nominal::Renamer;
     /// let renamer: Renamer<&Path, &Path> = Renamer::new();
     /// ```
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            renames: Default::default(),
+            renames: Vec::new(),
         }
     }
 
@@ -36,6 +37,7 @@ impl<S, T> Renamer<S, T> {
     /// # use nominal::Renamer;
     /// let renamer: Renamer<&Path, &Path> = Renamer::with_capacity(10);
     /// ```
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             renames: Vec::with_capacity(capacity),
@@ -63,6 +65,11 @@ where
     T: AsRef<Path>,
 {
     /// Consumes the renamer and returns a [`Plan`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PlanError`] if the rename operations cannot be planned
+    /// (e.g. duplicate sources or targets, or a rename cycle).
     pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
         let mut renames = self.renames;
         renames.retain(|r| r.source.as_ref() != r.target.as_ref());
@@ -234,7 +241,7 @@ mod tests {
             Err(PlanError::DuplicateSource { path }) => {
                 assert_eq!(path, PathBuf::from("a"));
             }
-            other => panic!("expected DuplicateSource, got {:?}", other),
+            other => panic!("expected DuplicateSource, got {other:?}"),
         }
     }
 
@@ -248,7 +255,7 @@ mod tests {
             Err(PlanError::DuplicateTarget { path }) => {
                 assert_eq!(path, PathBuf::from("z"));
             }
-            other => panic!("expected DuplicateTarget, got {:?}", other),
+            other => panic!("expected DuplicateTarget, got {other:?}"),
         }
     }
 
@@ -287,7 +294,7 @@ mod tests {
                 targets.sort();
                 assert_eq!(targets, vec![PathBuf::from("a"), PathBuf::from("b")]);
             }
-            other => panic!("expected Cycle, got {:?}", other),
+            other => panic!("expected Cycle, got {other:?}"),
         }
     }
 }
