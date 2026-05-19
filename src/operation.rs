@@ -34,7 +34,7 @@ where
     #[cfg(feature = "ansi")]
     pub fn write_colored_to<W>(
         &self,
-        w: &mut W,
+        writer: &mut W,
         ls_colors: &lscolors::LsColors,
     ) -> std::io::Result<()>
     where
@@ -53,7 +53,7 @@ where
                 let target = target.strip_prefix(common).unwrap();
 
                 writeln!(
-                    w,
+                    writer,
                     "{}{}/{}{{{}{}{} => {}{}{}}}",
                     common_style.prefix(),
                     common.display(),
@@ -68,7 +68,7 @@ where
             }
             None => {
                 writeln!(
-                    w,
+                    writer,
                     "{}{}{} => {}{}{}",
                     source_style.prefix(),
                     source.display(),
