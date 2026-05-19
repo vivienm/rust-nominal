@@ -92,12 +92,12 @@ where
             return Err(ApplyError::target_exists(source, target));
         }
 
-        if let Some(target_parent) = target.parent() {
-            if !target_parent.exists() {
-                tracing::debug!("creating parent directory for {}", target.display());
-                fs::create_dir_all(target_parent)
-                    .map_err(|err| ApplyError::from_io(source, target, err))?;
-            }
+        if let Some(target_parent) = target.parent()
+            && !target_parent.exists()
+        {
+            tracing::debug!("creating parent directory for {}", target.display());
+            fs::create_dir_all(target_parent)
+                .map_err(|err| ApplyError::from_io(source, target, err))?;
         }
         tracing::debug!("renaming {} to {}", source.display(), target.display());
         fs::rename(source, target).map_err(|err| ApplyError::from_io(source, target, err))?;

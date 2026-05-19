@@ -1,8 +1,8 @@
 [package]
 name = "nominal"
 version = "0.1.0"
-edition = "2021"
-description = "A Rust library for batch file renaming."
+edition = "2024"
+description = "A Rust library for batch file renaming"
 repository = "https://github.com/vivienm/rust-nominal"
 documentation = "https://vivienm.github.io/rust-nominal/docs/nominal/"
 license = "MIT"
