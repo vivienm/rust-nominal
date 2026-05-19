@@ -51,6 +51,9 @@ pub struct ApplyError {
     pub target: PathBuf,
     /// The details of the error.
     pub details: ApplyErrorDetails,
+    /// The number of rename operations successfully applied before this
+    /// failure.
+    pub applied: usize,
 }
 
 /// The details of an [`ApplyError`].
@@ -101,6 +104,7 @@ impl ApplyError {
             source: source.into(),
             target: target.into(),
             details,
+            applied: 0,
         }
     }
 

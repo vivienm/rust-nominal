@@ -114,7 +114,8 @@ where
     /// process creating the target in between can still be overwritten.
     ///
     /// If a rename fails partway through, the operations applied so far are
-    /// not rolled back.
+    /// not rolled back. The number of operations that succeeded is reported
+    /// in [`ApplyError::applied`].
     ///
     /// # Examples
     ///
@@ -138,9 +139,43 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn apply(self) -> Result<(), ApplyError> {
-        for rename in &self.renames {
-            rename.apply()?;
+        for (applied, rename) in self.renames.iter().enumerate() {
+            rename.apply().map_err(|mut err| {
+                err.applied = applied;
+                err
+            })?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use crate::Renamer;
+
+    #[test]
+    fn apply_reports_partial_count_on_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        // First rename succeeds, second collides with a pre-existing target.
+        File::create(dir.join("a")).unwrap();
+        File::create(dir.join("c")).unwrap();
+        File::create(dir.join("d")).unwrap();
+
+        let mut renamer = Renamer::new();
+        renamer.add(dir.join("a"), dir.join("b"));
+        renamer.add(dir.join("c"), dir.join("d"));
+
+        let err = renamer
+            .plan()
+            .unwrap()
+            .apply()
+            .expect_err("second rename should fail");
+        assert_eq!(err.applied, 1);
+        assert_eq!(err.source, dir.join("c"));
+        assert_eq!(err.target, dir.join("d"));
     }
 }
