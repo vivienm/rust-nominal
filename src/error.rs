@@ -1,4 +1,4 @@
-use std::{fmt, io, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
@@ -43,7 +43,8 @@ pub enum PlanError {
 }
 
 /// The error type returned from [`Plan::apply`](crate::plan::Plan::apply).
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("failed to rename {source:?} to {target:?}: {details}")]
 #[non_exhaustive]
 pub struct ApplyError {
     /// The source path of the rename operation.
@@ -51,6 +52,7 @@ pub struct ApplyError {
     /// The target path of the rename operation.
     pub target: PathBuf,
     /// The details of the error.
+    #[source]
     pub details: ApplyErrorDetails,
     /// The number of rename operations successfully applied before this
     /// failure.
@@ -84,40 +86,14 @@ impl ApplyError {
     }
 }
 
-impl fmt::Display for ApplyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to rename {:?} to {:?}: {}",
-            self.source, self.target, self.details
-        )
-    }
-}
-
-impl std::error::Error for ApplyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.details {
-            ApplyErrorDetails::TargetExists => None,
-            ApplyErrorDetails::Io(err) => Some(err),
-        }
-    }
-}
-
 /// The details of an [`ApplyError`].
-#[derive(Debug)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ApplyErrorDetails {
     /// The target path already exists.
+    #[error("target already exists")]
     TargetExists,
     /// An I/O error occurred.
-    Io(io::Error),
-}
-
-impl fmt::Display for ApplyErrorDetails {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ApplyErrorDetails::TargetExists => write!(f, "target already exists"),
-            ApplyErrorDetails::Io(err) => write!(f, "{}", err),
-        }
-    }
+    #[error("{0}")]
+    Io(#[from] io::Error),
 }
