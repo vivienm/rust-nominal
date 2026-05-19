@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use crate::{error::PlanError, operation::Rename, plan::Plan};
 
@@ -64,6 +64,15 @@ where
         let mut renames = self.renames;
         renames.retain(|r| r.source.as_ref() != r.target.as_ref());
 
+        let mut seen = HashSet::with_capacity(renames.len());
+        for rename in &renames {
+            if !seen.insert(rename.target.as_ref()) {
+                return Err(PlanError::DuplicateTarget {
+                    target: rename.target.as_ref().to_path_buf(),
+                });
+            }
+        }
+
         // Sort the renames by target path.
         #[cfg(feature = "unicode")]
         {
@@ -126,5 +135,38 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
         I: IntoIterator<Item = (S, T)>,
     {
         self.renames.extend(iter.into_iter().map(Into::into));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::Renamer;
+    use crate::error::PlanError;
+
+    #[test]
+    fn duplicate_target_is_rejected() {
+        let mut renamer = Renamer::new();
+        renamer.add("a", "z");
+        renamer.add("b", "z");
+
+        match renamer.plan() {
+            Err(PlanError::DuplicateTarget { target }) => {
+                assert_eq!(target, PathBuf::from("z"));
+            }
+            other => panic!("expected DuplicateTarget, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_noop_is_ignored() {
+        // Both entries are no-ops and dropped before the duplicate check.
+        let mut renamer = Renamer::new();
+        renamer.add("a", "a");
+        renamer.add("a", "a");
+
+        let plan = renamer.plan().expect("no-ops should not collide");
+        assert!(plan.is_empty());
     }
 }
