@@ -36,6 +36,7 @@ impl<S, T> Plan<S, T> {
     /// let plan = renamer.plan()?;
     /// assert_eq!(plan.len(), 1);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn len(&self) -> usize {
         self.renames.len()
     }
