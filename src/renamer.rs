@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    path::Path,
+};
 
 use crate::{error::PlanError, operation::Rename, plan::Plan};
 
@@ -73,7 +76,9 @@ where
             }
         }
 
-        // Sort the renames by target path.
+        // Sort by target path first, so that independent operations come out in
+        // a deterministic order and ties in the topological sort below break by
+        // target.
         #[cfg(feature = "unicode")]
         {
             use std::cmp::Ordering;
@@ -108,8 +113,73 @@ where
             renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
         }
 
+        topological_sort(&mut renames)?;
         Ok(Plan { renames })
     }
+}
+
+/// Reorders renames so that each operation runs after any other operation
+/// whose target is its source (which must vacate that path first). Returns
+/// [`PlanError::Cycle`] if no such ordering exists.
+fn topological_sort<S, T>(renames: &mut [Rename<S, T>]) -> Result<(), PlanError>
+where
+    S: AsRef<Path>,
+    T: AsRef<Path>,
+{
+    let n = renames.len();
+    let target_to_idx: HashMap<&Path, usize> = renames
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.target.as_ref(), i))
+        .collect();
+
+    let mut indegree = vec![0usize; n];
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, rename) in renames.iter().enumerate() {
+        if let Some(&j) = target_to_idx.get(rename.source.as_ref()) {
+            // Op j wants to write to a path (T_j = S_i) that op i still reads
+            // from. Op i must move it out of the way first: edge i -> j.
+            successors[i].push(j);
+            indegree[j] += 1;
+        }
+    }
+
+    // Kahn's algorithm. `dest[i]` ends up as the new position of the element
+    // currently at index i.
+    let mut dest = vec![0usize; n];
+    let mut placed = 0;
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
+    while let Some(i) = queue.pop_front() {
+        dest[i] = placed;
+        placed += 1;
+        for &j in &successors[i] {
+            indegree[j] -= 1;
+            if indegree[j] == 0 {
+                queue.push_back(j);
+            }
+        }
+    }
+
+    if placed != n {
+        let targets = renames
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| indegree[*i] > 0)
+            .map(|(_, r)| r.target.as_ref().to_path_buf())
+            .collect();
+        return Err(PlanError::Cycle { targets });
+    }
+
+    // Apply the permutation in place by following cycles.
+    for i in 0..n {
+        while dest[i] != i {
+            let j = dest[i];
+            renames.swap(i, j);
+            dest.swap(i, j);
+        }
+    }
+
+    Ok(())
 }
 
 impl<S, T> Default for Renamer<S, T> {
@@ -168,5 +238,37 @@ mod tests {
 
         let plan = renamer.plan().expect("no-ops should not collide");
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn chain_is_ordered_to_vacate_targets_first() {
+        // a -> b -> c: b must run before a, otherwise applying a -> b would
+        // collide with b's existing file.
+        let mut renamer = Renamer::new();
+        renamer.add("a", "b");
+        renamer.add("b", "c");
+
+        let plan = renamer.plan().expect("acyclic chain should plan");
+        let order: Vec<_> = plan
+            .renames
+            .iter()
+            .map(|r| (r.source, r.target))
+            .collect();
+        assert_eq!(order, vec![("b", "c"), ("a", "b")]);
+    }
+
+    #[test]
+    fn cycle_is_rejected() {
+        let mut renamer = Renamer::new();
+        renamer.add("a", "b");
+        renamer.add("b", "a");
+
+        match renamer.plan() {
+            Err(PlanError::Cycle { mut targets }) => {
+                targets.sort();
+                assert_eq!(targets, vec![PathBuf::from("a"), PathBuf::from("b")]);
+            }
+            other => panic!("expected Cycle, got {:?}", other),
+        }
     }
 }

@@ -27,6 +27,13 @@ pub enum PlanError {
         /// The target path that has more than one source.
         target: PathBuf,
     },
+    /// The rename operations form a cycle that cannot be resolved with direct
+    /// renames alone (e.g. a swap `a <-> b`).
+    #[error("rename cycle detected: {targets:?}")]
+    Cycle {
+        /// The target paths involved in the cycle.
+        targets: Vec<PathBuf>,
+    },
 }
 
 /// The error type returned from [`Plan::apply`](crate::plan::Plan::apply).

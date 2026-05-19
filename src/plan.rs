@@ -123,7 +123,6 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn apply(self) -> Result<(), ApplyError> {
-        // TODO: Multiple rounds to handle acyclic conflicts.
         for rename in &self.renames {
             rename.apply()?;
         }
