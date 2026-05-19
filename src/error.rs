@@ -56,44 +56,6 @@ pub struct ApplyError {
     pub applied: usize,
 }
 
-/// The details of an [`ApplyError`].
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum ApplyErrorDetails {
-    /// The target path already exists.
-    TargetExists,
-    /// An I/O error occurred.
-    Io(io::Error),
-}
-
-impl fmt::Display for ApplyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "failed to rename {:?} to {:?}: {}",
-            self.source, self.target, self.details
-        )
-    }
-}
-
-impl fmt::Display for ApplyErrorDetails {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ApplyErrorDetails::TargetExists => write!(f, "target already exists"),
-            ApplyErrorDetails::Io(err) => write!(f, "{}", err),
-        }
-    }
-}
-
-impl std::error::Error for ApplyError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match &self.details {
-            ApplyErrorDetails::TargetExists => None,
-            ApplyErrorDetails::Io(err) => Some(err),
-        }
-    }
-}
-
 impl ApplyError {
     pub(crate) fn new(
         source: impl Into<PathBuf>,
@@ -118,5 +80,43 @@ impl ApplyError {
         source: io::Error,
     ) -> Self {
         Self::new(from, to, ApplyErrorDetails::Io(source))
+    }
+}
+
+impl fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "failed to rename {:?} to {:?}: {}",
+            self.source, self.target, self.details
+        )
+    }
+}
+
+impl std::error::Error for ApplyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match &self.details {
+            ApplyErrorDetails::TargetExists => None,
+            ApplyErrorDetails::Io(err) => Some(err),
+        }
+    }
+}
+
+/// The details of an [`ApplyError`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum ApplyErrorDetails {
+    /// The target path already exists.
+    TargetExists,
+    /// An I/O error occurred.
+    Io(io::Error),
+}
+
+impl fmt::Display for ApplyErrorDetails {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ApplyErrorDetails::TargetExists => write!(f, "target already exists"),
+            ApplyErrorDetails::Io(err) => write!(f, "{}", err),
+        }
     }
 }
