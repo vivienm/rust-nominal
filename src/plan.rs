@@ -4,6 +4,7 @@ use crate::{error::ApplyError, operation::Rename};
 
 /// A renaming plan.
 #[derive(Debug)]
+#[must_use]
 pub struct Plan<S, T> {
     pub(crate) renames: Vec<Rename<S, T>>,
 }
