@@ -75,16 +75,13 @@ where
         renames.retain(|r| r.source.as_ref() != r.target.as_ref());
 
         let mut seen_sources = HashSet::with_capacity(renames.len());
+        let mut seen_targets = HashSet::with_capacity(renames.len());
         for rename in &renames {
             if !seen_sources.insert(rename.source.as_ref()) {
                 return Err(PlanError::DuplicateSource {
                     path: rename.source.as_ref().to_path_buf(),
                 });
             }
-        }
-
-        let mut seen_targets = HashSet::with_capacity(renames.len());
-        for rename in &renames {
             if !seen_targets.insert(rename.target.as_ref()) {
                 return Err(PlanError::DuplicateTarget {
                     path: rename.target.as_ref().to_path_buf(),
