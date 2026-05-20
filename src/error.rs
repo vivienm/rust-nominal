@@ -9,6 +9,8 @@ use thiserror::Error;
 pub enum Error {
     /// A plan error.
     Plan(#[from] PlanError),
+    /// A filesystem-check error.
+    CheckFs(#[from] CheckFsError),
     /// An apply error.
     Apply(#[from] ApplyError),
 }
@@ -41,6 +43,19 @@ pub enum PlanError {
         /// The cycles found in the rename graph. Each inner `Vec` lists the
         /// target paths of one cycle.
         cycles: Vec<Vec<PathBuf>>,
+    },
+}
+
+/// The error type returned from
+/// [`Plan::check_fs`](crate::plan::Plan::check_fs).
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum CheckFsError {
+    /// The target path already refers to a different file on disk.
+    #[error("target {target_path:?} already exists")]
+    TargetExists {
+        /// The target path of the conflicting rename.
+        target_path: PathBuf,
     },
 }
 

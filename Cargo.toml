@@ -23,6 +23,7 @@ icu_collator = { version = "2.2.0", optional = true, default-features = false, f
 icu_provider = { version = "2.2.0", optional = true, default-features = false }
 lscolors = { version = "0.21.0", optional = true, default-features = false, features = ["nu-ansi-term"] }
 nu-ansi-term = { version = "0.50.3", optional = true, default-features = false }
+same-file = "1.0.6"
 thiserror = "2.0.18"
 tracing = { version = "0.1.44", default-features = false }
 

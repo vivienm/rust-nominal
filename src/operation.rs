@@ -87,8 +87,10 @@ where
         let source = self.source.as_ref();
         let target = self.target.as_ref();
 
-        // We check before renaming to avoid overwriting the target.
-        if path_exists(target)? {
+        // Allow renames where source and target refer to the same filesystem
+        // entry — for example, a case-only rename on a case-insensitive
+        // filesystem, where the target "exists" only because it is the source.
+        if path_exists(target)? && !same_file::is_same_file(source, target)? {
             return Err(RenameError::TargetExists);
         }
 
