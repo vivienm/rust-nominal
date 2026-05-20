@@ -46,12 +46,10 @@ where
         let source_style = style_for_path(ls_colors, source);
         let target_style = style_for_path(ls_colors, target);
 
-        match common_ancestor(source, target) {
+        let (common, source_rest, target_rest) = split_for_display(source, target);
+        match common {
             Some(common) => {
                 let common_style = style_for_path(ls_colors, common);
-                let source = source.strip_prefix(common).unwrap();
-                let target = target.strip_prefix(common).unwrap();
-
                 writeln!(
                     writer,
                     "{}{}/{}{{{}{}{} => {}{}{}}}",
@@ -59,27 +57,24 @@ where
                     common.display(),
                     common_style.suffix(),
                     source_style.prefix(),
-                    source.display(),
+                    source_rest.display(),
                     source_style.suffix(),
                     target_style.prefix(),
-                    target.display(),
+                    target_rest.display(),
                     target_style.suffix()
-                )?;
+                )
             }
-            None => {
-                writeln!(
-                    writer,
-                    "{}{}{} => {}{}{}",
-                    source_style.prefix(),
-                    source.display(),
-                    source_style.suffix(),
-                    target_style.prefix(),
-                    target.display(),
-                    target_style.suffix()
-                )?;
-            }
+            None => writeln!(
+                writer,
+                "{}{}{} => {}{}{}",
+                source_style.prefix(),
+                source_rest.display(),
+                source_style.suffix(),
+                target_style.prefix(),
+                target_rest.display(),
+                target_style.suffix()
+            ),
         }
-        Ok(())
     }
 
     /// Executes the rename operation.
@@ -129,21 +124,48 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
-        match common_ancestor(source, target) {
-            Some(common) => {
-                let source = source.strip_prefix(common).unwrap();
-                let target = target.strip_prefix(common).unwrap();
-                write!(
-                    f,
-                    "{}/{{{} => {}}}",
-                    common.display(),
-                    source.display(),
-                    target.display()
-                )
-            }
-            None => write!(f, "{} => {}", source.display(), target.display()),
+        let (common, source_rest, target_rest) = split_for_display(source, target);
+        match common {
+            Some(common) => write!(
+                f,
+                "{}/{{{} => {}}}",
+                common.display(),
+                source_rest.display(),
+                target_rest.display()
+            ),
+            None => write!(f, "{} => {}", source_rest.display(), target_rest.display()),
         }
     }
+}
+
+/// Splits two paths for a `common/{a => b}` style display, returning the
+/// common prefix (if any) and the two remainders to print.
+///
+/// When factoring a common prefix wouldn't actually shorten the output, the
+/// first element is `None` and the remainders are the original paths. This
+/// happens when the only shared ancestor is the filesystem root (`/` on Unix,
+/// `C:\` on Windows), or when one path is a prefix of the other.
+fn split_for_display<'a>(
+    source: &'a Path,
+    target: &'a Path,
+) -> (Option<&'a Path>, &'a Path, &'a Path) {
+    let Some(common) = common_ancestor(source, target) else {
+        return (None, source, target);
+    };
+    // Skip a root-only common ancestor (`/` on Unix, `C:\` on Windows): factoring
+    // it out would produce `/{a => b}`, which reads worse than `/a => /b`.
+    if common.parent().is_none() {
+        return (None, source, target);
+    }
+    let (Ok(source_rest), Ok(target_rest)) =
+        (source.strip_prefix(common), target.strip_prefix(common))
+    else {
+        return (None, source, target);
+    };
+    if source_rest.as_os_str().is_empty() || target_rest.as_os_str().is_empty() {
+        return (None, source, target);
+    }
+    (Some(common), source_rest, target_rest)
 }
 
 #[cfg(feature = "ansi")]
@@ -157,4 +179,36 @@ where
         .style_for_path(path)
         .map(Style::to_nu_ansi_term_style)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Rename;
+
+    #[test]
+    fn display_factors_non_trivial_common_prefix() {
+        let r = Rename::new("/a/b/c", "/a/b/d");
+        assert_eq!(r.to_string(), "/a/b/{c => d}");
+    }
+
+    #[test]
+    fn display_does_not_factor_root_only_ancestor() {
+        let r = Rename::new("/a/b", "/x/y");
+        assert_eq!(r.to_string(), "/a/b => /x/y");
+    }
+
+    #[test]
+    fn display_does_not_factor_when_one_path_is_a_prefix_of_the_other() {
+        let r = Rename::new("a", "a/b");
+        assert_eq!(r.to_string(), "a => a/b");
+
+        let r = Rename::new("a/b", "a");
+        assert_eq!(r.to_string(), "a/b => a");
+    }
+
+    #[test]
+    fn display_falls_back_when_no_common_ancestor() {
+        let r = Rename::new("a/b", "x/y");
+        assert_eq!(r.to_string(), "a/b => x/y");
+    }
 }
