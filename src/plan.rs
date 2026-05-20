@@ -1,8 +1,7 @@
 use std::{collections::HashSet, io, path::Path, vec};
 
 use crate::{
-    error::{ApplyError, CheckFsError},
-    fsutil::path_exists,
+    error::{ApplyError, FsConflict},
     operation::Rename,
 };
 
@@ -157,22 +156,28 @@ where
     /// assert_eq!(plan.len(), 1);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn check_fs(&mut self) -> io::Result<Vec<CheckFsError>> {
+    pub fn check_fs(&mut self) -> io::Result<Vec<FsConflict>> {
         let sources: HashSet<&Path> = self.renames.iter().map(|r| r.source.as_ref()).collect();
 
         // Mark conflicts in a first pass so the immutable borrow on
         // `self.renames` is released before we start moving entries.
         let mut is_conflict = Vec::with_capacity(self.renames.len());
         for rename in &self.renames {
+            let source = rename.source.as_ref();
             let target = rename.target.as_ref();
             // A target that is itself a source within the batch will be
             // vacated by another rename (the topological sort guarantees the
             // order), so it is not a conflict.
-            is_conflict.push(
-                !sources.contains(target)
-                    && path_exists(target)?
-                    && !same_file::is_same_file(rename.source.as_ref(), target)?,
-            );
+            let conflict = if sources.contains(target) {
+                false
+            } else {
+                match same_file::is_same_file(source, target) {
+                    Ok(same) => !same,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+                    Err(err) => return Err(err),
+                }
+            };
+            is_conflict.push(conflict);
         }
         drop(sources);
 
@@ -182,7 +187,7 @@ where
             .zip(is_conflict)
             .filter_map(|(rename, conflict)| {
                 if conflict {
-                    conflicts.push(CheckFsError::TargetExists {
+                    conflicts.push(FsConflict::TargetExists {
                         target_path: rename.target.as_ref().to_path_buf(),
                     });
                     None
@@ -374,7 +379,7 @@ mod tests {
 
         assert_eq!(conflicts.len(), 1);
         match &conflicts[0] {
-            crate::CheckFsError::TargetExists { target_path } => {
+            crate::FsConflict::TargetExists { target_path } => {
                 assert_eq!(target_path, &dir.join("b"));
             }
         }

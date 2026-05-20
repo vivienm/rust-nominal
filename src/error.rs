@@ -9,8 +9,8 @@ use thiserror::Error;
 pub enum Error {
     /// A plan error.
     Plan(#[from] PlanError),
-    /// A filesystem-check error.
-    CheckFs(#[from] CheckFsError),
+    /// A filesystem-check conflict.
+    CheckFs(#[from] FsConflict),
     /// An apply error.
     Apply(#[from] ApplyError),
 }
@@ -46,11 +46,11 @@ pub enum PlanError {
     },
 }
 
-/// The error type returned from
+/// A filesystem conflict reported by
 /// [`Plan::check_fs`](crate::plan::Plan::check_fs).
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum CheckFsError {
+pub enum FsConflict {
     /// The target path already refers to a different file on disk.
     #[error("target {target_path:?} already exists")]
     TargetExists {

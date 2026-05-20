@@ -1,9 +1,6 @@
-use std::{fmt, fs, path::Path};
+use std::{fmt, fs, io, path::Path};
 
-use crate::{
-    error::RenameError,
-    fsutil::{common_ancestor, path_exists},
-};
+use crate::{error::RenameError, fsutil::common_ancestor};
 
 /// A rename operation.
 #[derive(Debug)]
@@ -87,11 +84,14 @@ where
         let source = self.source.as_ref();
         let target = self.target.as_ref();
 
-        // Allow renames where source and target refer to the same filesystem
-        // entry — for example, a case-only rename on a case-insensitive
-        // filesystem, where the target "exists" only because it is the source.
-        if path_exists(target)? && !same_file::is_same_file(source, target)? {
-            return Err(RenameError::TargetExists);
+        // Reject targets that exist and refer to a different file. Targets
+        // that resolve to the source itself (e.g. a case-only rename on a
+        // case-insensitive filesystem) are allowed through.
+        match same_file::is_same_file(source, target) {
+            Ok(true) => {}
+            Ok(false) => return Err(RenameError::TargetExists),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
         }
 
         if let Some(target_parent) = target.parent()
