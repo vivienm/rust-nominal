@@ -206,11 +206,10 @@ where
     /// process creating the target in between can still be overwritten.
     ///
     /// If a rename fails partway through, the operations applied so far are
-    /// not rolled back. The number of operations that succeeded is reported
-    /// in [`ApplyError::applied`].
+    /// not rolled back.
     ///
-    /// To continue past failures, use [`apply_iter`](Self::apply_iter)
-    /// instead.
+    /// To continue past failures, or to know how many renames succeeded
+    /// before a failure, use [`apply_iter`](Self::apply_iter) instead.
     ///
     /// # Errors
     ///
@@ -284,7 +283,7 @@ where
     /// ```
     pub fn apply_iter(self) -> ApplyIter<S, T> {
         ApplyIter {
-            iter: self.renames.into_iter().enumerate(),
+            iter: self.renames.into_iter(),
         }
     }
 }
@@ -296,7 +295,7 @@ where
 #[derive(Debug)]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct ApplyIter<S, T> {
-    iter: std::iter::Enumerate<vec::IntoIter<Rename<S, T>>>,
+    iter: vec::IntoIter<Rename<S, T>>,
 }
 
 impl<S, T> Iterator for ApplyIter<S, T>
@@ -307,14 +306,13 @@ where
     type Item = Result<Rename<S, T>, ApplyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (applied, rename) = self.iter.next()?;
+        let rename = self.iter.next()?;
         Some(match rename.apply() {
             Ok(()) => Ok(rename),
             Err(source) => Err(ApplyError {
                 source_path: rename.source.as_ref().to_path_buf(),
                 target_path: rename.target.as_ref().to_path_buf(),
                 source,
-                applied,
             }),
         })
     }
@@ -338,7 +336,7 @@ mod tests {
     use crate::Renamer;
 
     #[test]
-    fn apply_reports_partial_count_on_failure() {
+    fn apply_reports_failure_path() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dir = temp_dir.path();
 
@@ -356,7 +354,6 @@ mod tests {
             .unwrap()
             .apply()
             .expect_err("second rename should fail");
-        assert_eq!(err.applied, 1);
         assert_eq!(err.source_path, dir.join("c"));
         assert_eq!(err.target_path, dir.join("d"));
     }
@@ -452,7 +449,6 @@ mod tests {
         assert_eq!(outcomes.len(), 3);
         assert!(outcomes[0].is_ok());
         let err = outcomes[1].as_ref().unwrap_err();
-        assert_eq!(err.applied, 1);
         assert_eq!(err.source_path, dir.join("c"));
         assert_eq!(err.target_path, dir.join("d"));
         assert!(outcomes[2].is_ok());

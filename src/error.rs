@@ -70,9 +70,6 @@ pub struct ApplyError {
     pub target_path: PathBuf,
     /// The underlying rename error.
     pub source: RenameError,
-    /// The number of rename operations successfully applied before this
-    /// failure.
-    pub applied: usize,
 }
 
 /// An error from a single rename operation.
