@@ -34,12 +34,13 @@ pub enum PlanError {
         /// The target path that has more than one source.
         path: PathBuf,
     },
-    /// The rename operations form a cycle that cannot be resolved with direct
-    /// renames alone (e.g. a swap `a <-> b`).
-    #[error("rename cycle detected: {targets:?}")]
+    /// The rename operations contain one or more cycles that cannot be
+    /// resolved with direct renames alone (e.g. a swap `a <-> b`).
+    #[error("rename cycle(s) detected: {cycles:?}")]
     Cycle {
-        /// The target paths involved in the cycle.
-        targets: Vec<PathBuf>,
+        /// The cycles found in the rename graph. Each inner `Vec` lists the
+        /// target paths of one cycle.
+        cycles: Vec<Vec<PathBuf>>,
     },
 }
 

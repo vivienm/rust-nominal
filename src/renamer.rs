@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use crate::{error::PlanError, operation::Rename, plan::Plan};
@@ -204,13 +204,29 @@ where
     }
 
     if placed != n {
-        let targets = renames
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| indegree[*i] > 0)
-            .map(|(_, r)| r.target.as_ref().to_path_buf())
-            .collect();
-        return Err(PlanError::Cycle { targets });
+        // Each remaining node has indegree 1 and exactly one successor (every
+        // target is unique, every rename has one source), so the leftover
+        // graph decomposes into disjoint simple cycles — walk each one by
+        // following `successor` until we come back to the start.
+        let mut visited = vec![false; n];
+        let mut cycles: Vec<Vec<PathBuf>> = Vec::new();
+        for start in 0..n {
+            if visited[start] || indegree[start] == 0 {
+                continue;
+            }
+            let mut cycle = Vec::new();
+            let mut i = start;
+            loop {
+                visited[i] = true;
+                cycle.push(renames[i].target.as_ref().to_path_buf());
+                i = successor[i].expect("nodes left after Kahn's algorithm have a successor");
+                if i == start {
+                    break;
+                }
+            }
+            cycles.push(cycle);
+        }
+        return Err(PlanError::Cycle { cycles });
     }
 
     // Apply the permutation in place by following cycles.
@@ -291,9 +307,42 @@ mod tests {
         renamer.add("b", "a");
 
         match renamer.plan() {
-            Err(PlanError::Cycle { mut targets }) => {
+            Err(PlanError::Cycle { cycles }) => {
+                assert_eq!(cycles.len(), 1);
+                let mut targets = cycles.into_iter().next().unwrap();
                 targets.sort();
                 assert_eq!(targets, vec![PathBuf::from("a"), PathBuf::from("b")]);
+            }
+            other => panic!("expected Cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disjoint_cycles_are_grouped_separately() {
+        // Two independent swaps: a <-> b and c <-> d.
+        let mut renamer = Renamer::new();
+        renamer.add("a", "b");
+        renamer.add("b", "a");
+        renamer.add("c", "d");
+        renamer.add("d", "c");
+
+        match renamer.plan() {
+            Err(PlanError::Cycle { cycles }) => {
+                let mut normalized: Vec<Vec<PathBuf>> = cycles
+                    .into_iter()
+                    .map(|mut c| {
+                        c.sort();
+                        c
+                    })
+                    .collect();
+                normalized.sort();
+                assert_eq!(
+                    normalized,
+                    vec![
+                        vec![PathBuf::from("a"), PathBuf::from("b")],
+                        vec![PathBuf::from("c"), PathBuf::from("d")],
+                    ]
+                );
             }
             other => panic!("expected Cycle, got {other:?}"),
         }
