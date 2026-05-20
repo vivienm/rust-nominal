@@ -1,4 +1,4 @@
-use std::{io, path::Path};
+use std::{io, path::Path, vec};
 
 use crate::{error::ApplyError, operation::Rename};
 
@@ -111,7 +111,7 @@ where
         })
     }
 
-    /// Executes the plan.
+    /// Executes the plan, stopping at the first failure.
     ///
     /// Each rename checks that its target does not exist before proceeding,
     /// but this check is not atomic with the rename itself: a concurrent
@@ -120,6 +120,9 @@ where
     /// If a rename fails partway through, the operations applied so far are
     /// not rolled back. The number of operations that succeeded is reported
     /// in [`ApplyError::applied`].
+    ///
+    /// To continue past failures, use [`apply_iter`](Self::apply_iter)
+    /// instead.
     ///
     /// # Errors
     ///
@@ -148,16 +151,96 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn apply(self) -> Result<(), ApplyError> {
-        for (applied, rename) in self.renames.iter().enumerate() {
-            rename.apply().map_err(|source| ApplyError {
+        for result in self.apply_iter() {
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Executes the plan one rename at a time, yielding the outcome of each.
+    ///
+    /// The iterator runs each rename as it is pulled and yields either the
+    /// completed [`Rename`] or an [`ApplyError`] describing the failure.
+    /// Iteration continues after errors, so callers can choose to keep going
+    /// (best-effort) or stop early. The TOCTOU and partial-application
+    /// caveats from [`apply`](Self::apply) apply to each step.
+    ///
+    /// # Examples
+    ///
+    /// Best-effort: rename what we can, collect failures.
+    ///
+    /// ```
+    /// # use std::fs::File;
+    /// # use nominal::Renamer;
+    /// let temp_dir = tempfile::tempdir()?;
+    /// let dir = temp_dir.path();
+    /// File::create(dir.join("a"))?;
+    /// File::create(dir.join("c"))?;
+    /// File::create(dir.join("d"))?; // pre-existing target, will collide
+    ///
+    /// let mut renamer = Renamer::new();
+    /// renamer.add(dir.join("a"), dir.join("b"));
+    /// renamer.add(dir.join("c"), dir.join("d"));
+    ///
+    /// let mut renamed = 0;
+    /// let mut errors = Vec::new();
+    /// for result in renamer.plan()?.apply_iter() {
+    ///     match result {
+    ///         Ok(_) => renamed += 1,
+    ///         Err(err) => errors.push(err),
+    ///     }
+    /// }
+    /// assert_eq!(renamed, 1);
+    /// assert_eq!(errors.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn apply_iter(self) -> ApplyIter<S, T> {
+        ApplyIter {
+            iter: self.renames.into_iter().enumerate(),
+        }
+    }
+}
+
+/// Iterator returned by [`Plan::apply_iter`].
+///
+/// Each call to [`next`](Iterator::next) executes one rename and yields its
+/// outcome. Created by [`Plan::apply_iter`]; see that method for details.
+#[derive(Debug)]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct ApplyIter<S, T> {
+    iter: std::iter::Enumerate<vec::IntoIter<Rename<S, T>>>,
+}
+
+impl<S, T> Iterator for ApplyIter<S, T>
+where
+    S: AsRef<Path>,
+    T: AsRef<Path>,
+{
+    type Item = Result<Rename<S, T>, ApplyError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (applied, rename) = self.iter.next()?;
+        Some(match rename.apply() {
+            Ok(()) => Ok(rename),
+            Err(source) => Err(ApplyError {
                 source_path: rename.source.as_ref().to_path_buf(),
                 target_path: rename.target.as_ref().to_path_buf(),
                 source,
                 applied,
-            })?;
-        }
-        Ok(())
+            }),
+        })
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<S, T> ExactSizeIterator for ApplyIter<S, T>
+where
+    S: AsRef<Path>,
+    T: AsRef<Path>,
+{
 }
 
 #[cfg(test)]
@@ -188,5 +271,35 @@ mod tests {
         assert_eq!(err.applied, 1);
         assert_eq!(err.source_path, dir.join("c"));
         assert_eq!(err.target_path, dir.join("d"));
+    }
+
+    #[test]
+    fn apply_iter_continues_past_failures() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+
+        // Middle rename collides with a pre-existing target; the others go
+        // through. Best-effort iteration should yield Ok / Err / Ok in order.
+        File::create(dir.join("a")).unwrap();
+        File::create(dir.join("c")).unwrap();
+        File::create(dir.join("d")).unwrap();
+        File::create(dir.join("e")).unwrap();
+
+        let mut renamer = Renamer::new();
+        renamer.add(dir.join("a"), dir.join("b"));
+        renamer.add(dir.join("c"), dir.join("d"));
+        renamer.add(dir.join("e"), dir.join("f"));
+
+        let outcomes: Vec<_> = renamer.plan().unwrap().apply_iter().collect();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes[0].is_ok());
+        let err = outcomes[1].as_ref().unwrap_err();
+        assert_eq!(err.applied, 1);
+        assert_eq!(err.source_path, dir.join("c"));
+        assert_eq!(err.target_path, dir.join("d"));
+        assert!(outcomes[2].is_ok());
+
+        assert!(dir.join("b").exists());
+        assert!(dir.join("f").exists());
     }
 }
