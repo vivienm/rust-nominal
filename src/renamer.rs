@@ -7,6 +7,7 @@ use crate::{error::PlanError, operation::Rename, plan::Plan};
 
 /// Prepares a batch file renaming operation.
 #[derive(Debug)]
+#[must_use]
 pub struct Renamer<S, T> {
     renames: Vec<Rename<S, T>>,
 }
@@ -21,7 +22,6 @@ impl<S, T> Renamer<S, T> {
     /// # use nominal::Renamer;
     /// let renamer: Renamer<&Path, &Path> = Renamer::new();
     /// ```
-    #[must_use]
     pub fn new() -> Self {
         Self {
             renames: Vec::new(),
@@ -37,7 +37,6 @@ impl<S, T> Renamer<S, T> {
     /// # use nominal::Renamer;
     /// let renamer: Renamer<&Path, &Path> = Renamer::with_capacity(10);
     /// ```
-    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             renames: Vec::with_capacity(capacity),
