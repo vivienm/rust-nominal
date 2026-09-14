@@ -150,3 +150,110 @@ fn normalization_preserves_trailing_directory_requirements() {
         assert!(!target.exists());
     }
 }
+
+#[test]
+fn nested_destinations_are_rejected_before_any_files_are_moved() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name| dir.path().join(name);
+        fs::write(p("a"), "A").unwrap();
+        fs::write(p("b"), "B").unwrap();
+        let mut renames = [(p("a"), p("out")), (p("b"), p("out/child"))];
+        if reverse {
+            renames.reverse();
+        }
+        let error = Renamer::from_iter(renames).plan().unwrap_err();
+        assert!(
+            matches!(error, PlanError::OverlappingPaths { ancestor_path, descendant_path }
+            if ancestor_path == p("out") && descendant_path == p("out/child"))
+        );
+        assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
+        assert_eq!(fs::read_to_string(p("b")).unwrap(), "B");
+        assert!(!p("out").exists());
+    }
+}
+
+#[test]
+fn nested_destinations_are_detected_through_parent_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("sub")).unwrap();
+    let error = Renamer::from_iter([(p("a"), p("out")), (p("b"), p("sub/../out/child"))])
+        .plan()
+        .unwrap_err();
+    assert!(matches!(error, PlanError::OverlappingPaths { .. }));
+}
+
+#[test]
+fn directory_and_descendant_moves_require_separate_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("folder")).unwrap();
+    fs::write(p("folder/file"), "data").unwrap();
+    let error = Renamer::from_iter([(p("folder"), p("moved")), (p("folder/file"), p("file"))])
+        .plan()
+        .unwrap_err();
+    assert!(matches!(error, PlanError::OverlappingPaths { .. }));
+    assert_eq!(fs::read_to_string(p("folder/file")).unwrap(), "data");
+    let error = Renamer::from_iter([(p("folder"), p("folder/child"))])
+        .plan()
+        .unwrap_err();
+    assert!(matches!(error, PlanError::OverlappingPaths { .. }));
+}
+
+#[test]
+fn sibling_destinations_and_independent_directory_moves_remain_supported() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("folder")).unwrap();
+    fs::write(p("folder/file"), "data").unwrap();
+    fs::write(p("a"), "A").unwrap();
+    fs::write(p("b"), "B").unwrap();
+    let mut plan = Renamer::from_iter([
+        (p("folder"), p("moved")),
+        (p("a"), p("out/first")),
+        (p("b"), p("out/second")),
+    ])
+    .plan()
+    .unwrap();
+    assert!(plan.check_fs().unwrap().is_empty());
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("moved/file")).unwrap(), "data");
+    assert_eq!(fs::read_to_string(p("out/first")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(p("out/second")).unwrap(), "B");
+}
+
+#[test]
+fn relative_paths_are_anchored_at_planning_time() {
+    const CHILD: &str = "NOMINAL_PLANNING_CWD_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Changing cwd is process-wide; isolate this case from other tests.
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "relative_paths_are_anchored_at_planning_time"])
+            .env(CHILD, "1")
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let base = std::env::current_dir().unwrap();
+    fs::write("a", "A").unwrap();
+    fs::write("b", "B").unwrap();
+    fs::create_dir("other").unwrap();
+    let mut plan = Renamer::from_iter([
+        (std::path::PathBuf::from("a"), base.join("b")),
+        (std::path::PathBuf::from("./b"), base.join("c")),
+    ])
+    .plan()
+    .unwrap();
+    std::env::set_current_dir("other").unwrap();
+    assert!(plan.check_fs().unwrap().is_empty());
+    let results: Vec<_> = plan.apply_iter().map(Result::unwrap).collect();
+    assert_eq!(results[0].source, std::path::Path::new("./b"));
+    assert_eq!(fs::read_to_string(base.join("b")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(base.join("c")).unwrap(), "B");
+    assert!(!base.join("a").exists());
+    assert_eq!(fs::read_dir(".").unwrap().count(), 0);
+}

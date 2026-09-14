@@ -71,10 +71,16 @@ where
     /// unchanged so symlinks themselves can be renamed. Original paths are
     /// preserved for display and results.
     ///
+    /// A batch cannot contain a source or target that is a strict ancestor
+    /// of another source or target. This includes nested destinations such
+    /// as `out` and `out/child`, even when the source of `out` is a directory.
+    /// Rename directories and their descendants in separate batches.
+    ///
     /// # Errors
     ///
     /// Returns a [`PlanError`] if a parent cannot be resolved, or if operations
-    /// have duplicate sources or targets (including parent aliases), or a cycle.
+    /// have duplicate sources or targets (including parent aliases), overlapping
+    /// ancestor/descendant paths, or a cycle.
     /// A `..` component after a missing directory is rejected because its
     /// filesystem meaning cannot be resolved.
     pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
@@ -107,6 +113,27 @@ where
                 return Err(PlanError::DuplicateTarget {
                     path: rename.target.as_ref().to_path_buf(),
                 });
+            }
+        }
+
+        // Parent/child endpoints can invalidate each other's paths or require
+        // contradictory target types. Reject them before any operation runs.
+        let mut endpoints = HashMap::with_capacity(2 * renames.len());
+        for rename in &renames {
+            for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                endpoints.entry(paths[path].as_path()).or_insert(path);
+            }
+        }
+        for rename in &renames {
+            for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                for ancestor in paths[path].ancestors().skip(1) {
+                    if let Some(original) = endpoints.get(ancestor) {
+                        return Err(PlanError::OverlappingPaths {
+                            ancestor_path: original.to_path_buf(),
+                            descendant_path: path.to_path_buf(),
+                        });
+                    }
+                }
             }
         }
 

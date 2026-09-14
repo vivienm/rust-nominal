@@ -44,6 +44,16 @@ pub enum PlanError {
         /// The target path that has more than one source.
         path: PathBuf,
     },
+    /// A source or target is a strict ancestor of another source or target.
+    /// These batches are unsupported because renames can change directory
+    /// structure needed by other operations.
+    #[error("overlapping batch paths: {ancestor_path:?} contains {descendant_path:?}")]
+    OverlappingPaths {
+        /// The original path naming an ancestor entry.
+        ancestor_path: PathBuf,
+        /// The original path naming a descendant entry.
+        descendant_path: PathBuf,
+    },
     /// The rename operations contain one or more cycles that cannot be
     /// resolved with direct renames alone (e.g. a swap `a <-> b`).
     #[error("rename cycle(s) detected: {cycles:?}")]
