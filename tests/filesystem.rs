@@ -2,7 +2,41 @@
 
 use std::{fs, path::Path};
 
-use nominal::{FsConflict, RenameError, Renamer};
+use nominal::{FsConflict, Rename, RenameError, Renamer};
+
+#[test]
+fn direct_rename_rejects_missing_parent_before_dotdot_without_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    let victim = dir.path().join("victim");
+    fs::write(&source, "new contents").unwrap();
+    fs::write(&victim, "keep me").unwrap();
+
+    let result = Rename::new(&source, dir.path().join("missing/../victim")).apply();
+
+    assert!(result.is_err());
+    assert_eq!(fs::read_to_string(&source).unwrap(), "new contents");
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+    assert!(!dir.path().join("missing").exists());
+}
+
+#[test]
+fn direct_rename_resolves_existing_parents_and_creates_missing_destinations() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    let source = dir.path().join("source");
+    fs::write(&source, "contents").unwrap();
+
+    Rename::new(&source, dir.path().join("sub/../new/deep/target"))
+        .apply()
+        .unwrap();
+
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read_to_string(dir.path().join("new/deep/target")).unwrap(),
+        "contents"
+    );
+}
 
 fn assert_conflict(source: &Path, target: &Path) {
     let mut plan = Renamer::from_iter([(source, target)]).plan().unwrap();

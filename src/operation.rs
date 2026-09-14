@@ -86,6 +86,10 @@ where
     /// Source and target paths are unrestricted. Callers must enforce any
     /// required directory confinement before passing paths to this method.
     ///
+    /// Parent aliases are resolved before checking the target or creating
+    /// directories, as in [`crate::Renamer::plan`]. A `..` component after a
+    /// missing directory is rejected because it cannot be resolved on disk.
+    ///
     /// The target is checked for existence before renaming to avoid
     /// overwriting it, using the same conflict rules as [`crate::Plan::check_fs`].
     /// This check and the rename itself are not atomic:
@@ -100,20 +104,16 @@ where
     /// also fails, [`RenameError::RecoveryFailed`] reports where the entry was
     /// retained; it is never deleted by temporary-directory cleanup.
     pub fn apply(&self) -> Result<(), RenameError> {
-        let source = self.source.as_ref();
-        let target = self.target.as_ref();
+        let source = entry_path(self.source.as_ref())?;
+        let target = entry_path(self.target.as_ref())?;
+        let (source, target) = (source.as_path(), target.as_path());
 
         match target_state(source, target)? {
             TargetState::Conflict => return Err(RenameError::TargetExists),
             TargetState::SameEntry
                 if source.file_name().is_some() && source.file_name() != target.file_name() =>
             {
-                // Anchor both paths before staging, including for direct Rename users.
-                return rename_via_temporary(
-                    &entry_path(source)?,
-                    &entry_path(target)?,
-                    rename_to_free_target,
-                );
+                return rename_via_temporary(source, target, rename_to_free_target);
             }
             _ => {}
         }
