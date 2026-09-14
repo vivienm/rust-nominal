@@ -1,6 +1,9 @@
-use std::{fmt, fs, io, path::Path};
+use std::{fmt, fs, path::Path};
 
-use crate::{error::RenameError, fsutil::common_ancestor};
+use crate::{
+    error::RenameError,
+    fsutil::{common_ancestor, target_conflicts},
+};
 
 /// A rename operation.
 #[derive(Debug)]
@@ -77,21 +80,16 @@ where
     /// Executes the rename operation.
     ///
     /// The target is checked for existence before renaming to avoid
-    /// overwriting it. This check and the rename itself are not atomic:
+    /// overwriting it, using the same conflict rules as [`crate::Plan::check_fs`].
+    /// This check and the rename itself are not atomic:
     /// a concurrent process creating the target between the two calls
     /// can still be overwritten.
     pub fn apply(&self) -> Result<(), RenameError> {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
 
-        // Reject targets that exist and refer to a different file. Targets
-        // that resolve to the source itself (e.g. a case-only rename on a
-        // case-insensitive filesystem) are allowed through.
-        match same_file::is_same_file(source, target) {
-            Ok(true) => {}
-            Ok(false) => return Err(RenameError::TargetExists),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
+        if target_conflicts(source, target)? {
+            return Err(RenameError::TargetExists);
         }
 
         if let Some(target_parent) = target.parent()

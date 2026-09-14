@@ -51,7 +51,7 @@ pub enum PlanError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum FsConflict {
-    /// The target path already refers to a different file on disk.
+    /// The target path is occupied by another directory entry on disk.
     #[error("target {target_path:?} already exists")]
     TargetExists {
         /// The target path of the conflicting rename.

@@ -2,6 +2,7 @@ use std::{collections::HashSet, io, path::Path, vec};
 
 use crate::{
     error::{ApplyError, FsConflict},
+    fsutil::target_conflicts,
     operation::Rename,
 };
 
@@ -115,13 +116,16 @@ where
     }
 
     /// Inspects the filesystem and returns the renames whose target path
-    /// already refers to a different file on disk.
+    /// is occupied by another directory entry on disk.
     ///
     /// Conflicting renames are removed from the plan, so a subsequent
     /// [`apply`](Self::apply) only attempts the entries that are still safe
-    /// to perform. Two paths that resolve to the same filesystem entry (e.g.
-    /// a case-only rename on a case-insensitive filesystem, or a symlink to
-    /// the source) are not treated as conflicts.
+    /// to perform. Existing symlinks and separate hard links are conflicts,
+    /// including dangling symlinks and links to the source. Case-only renames
+    /// of singly linked files on case-insensitive filesystems are allowed.
+    /// On Unix, existing targets for multiply linked files are conservatively
+    /// rejected even for case-only changes. On non-Unix platforms, existing
+    /// symlink targets are always rejected.
     ///
     /// Targets shared by multiple renames in the same batch are already
     /// rejected at [`plan`](crate::Renamer::plan) time as
@@ -171,11 +175,7 @@ where
             let conflict = if sources.contains(target) {
                 false
             } else {
-                match same_file::is_same_file(source, target) {
-                    Ok(same) => !same,
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-                    Err(err) => return Err(err),
-                }
+                target_conflicts(source, target)?
             };
             is_conflict.push(conflict);
         }
@@ -407,15 +407,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn check_fs_does_not_report_same_file_via_symlink() {
+    fn check_fs_reports_target_symlink_to_source() {
         use std::os::unix::fs::symlink;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let dir = temp_dir.path();
 
         File::create(dir.join("a")).unwrap();
-        // The "target" is a symlink that resolves to the source — same file,
-        // no conflict.
+        // A symlink to the source is still a distinct directory entry.
         symlink(dir.join("a"), dir.join("b")).unwrap();
 
         let mut renamer = Renamer::new();
@@ -424,8 +423,8 @@ mod tests {
         let mut plan = renamer.plan().unwrap();
         let conflicts = plan.check_fs().unwrap();
 
-        assert!(conflicts.is_empty());
-        assert_eq!(plan.len(), 1);
+        assert_eq!(conflicts.len(), 1);
+        assert!(plan.is_empty());
     }
 
     #[test]
