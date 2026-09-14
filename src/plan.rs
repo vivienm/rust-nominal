@@ -126,6 +126,8 @@ where
     /// On Unix, existing targets for multiply linked files are conservatively
     /// rejected even for case-only changes. On non-Unix platforms, existing
     /// symlink targets are always rejected.
+    /// Conflicts propagate through chains: if `b -> c` is rejected because
+    /// `c` exists, `a -> b` is also rejected while `b` remains occupied.
     ///
     /// Targets shared by multiple renames in the same batch are already
     /// rejected at [`plan`](crate::Renamer::plan) time as
@@ -161,7 +163,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn check_fs(&mut self) -> io::Result<Vec<FsConflict>> {
-        let sources: HashSet<&Path> = self.renames.iter().map(|r| r.source.as_ref()).collect();
+        let mut vacated: HashSet<&Path> = HashSet::with_capacity(self.renames.len());
 
         // Mark conflicts in a first pass so the immutable borrow on
         // `self.renames` is released before we start moving entries.
@@ -169,17 +171,20 @@ where
         for rename in &self.renames {
             let source = rename.source.as_ref();
             let target = rename.target.as_ref();
-            // A target that is itself a source within the batch will be
-            // vacated by another rename (the topological sort guarantees the
-            // order), so it is not a conflict.
-            let conflict = if sources.contains(target) {
+            // The plan is in execution order. Only retained earlier operations
+            // will vacate their sources; a rejected operation cannot unblock
+            // the rest of its chain.
+            let conflict = if vacated.contains(target) {
                 false
             } else {
                 target_conflicts(source, target)?
             };
             is_conflict.push(conflict);
+            if !conflict {
+                vacated.insert(source);
+            }
         }
-        drop(sources);
+        drop(vacated);
 
         let mut conflicts = Vec::new();
         self.renames = std::mem::take(&mut self.renames)

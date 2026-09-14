@@ -150,3 +150,71 @@ mod unix {
         assert!(target.exists());
     }
 }
+
+#[test]
+fn conflicts_propagate_through_chains_without_removing_independent_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    for name in ["a", "b", "c", "d", "independent"] {
+        fs::write(p(name), name).unwrap();
+    }
+    let mut plan = Renamer::from_iter([
+        (p("a"), p("b")),
+        (p("b"), p("c")),
+        (p("c"), p("d")),
+        (p("independent"), p("free")),
+    ])
+    .plan()
+    .unwrap();
+    let conflicts = plan.check_fs().unwrap();
+    let targets: Vec<_> = conflicts
+        .iter()
+        .map(|conflict| match conflict {
+            FsConflict::TargetExists { target_path } => target_path.clone(),
+            _ => panic!("unexpected conflict: {conflict:?}"),
+        })
+        .collect();
+    assert_eq!(targets, [p("d"), p("c"), p("b")]);
+    assert_eq!(plan.len(), 1);
+    assert!(plan.check_fs().unwrap().is_empty());
+    plan.apply().unwrap();
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(fs::read_to_string(p(name)).unwrap(), name);
+    }
+    assert_eq!(fs::read_to_string(p("free")).unwrap(), "independent");
+}
+
+#[test]
+fn hard_link_conflict_propagates_to_dependent_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::write(p("a"), "A").unwrap();
+    fs::write(p("b"), "B").unwrap();
+    fs::hard_link(p("b"), p("c")).unwrap();
+    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
+        .plan()
+        .unwrap();
+    assert_eq!(plan.check_fs().unwrap().len(), 2);
+    assert!(plan.is_empty());
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "B");
+    assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
+}
+
+#[test]
+fn unblocked_chain_moves_original_contents_to_their_targets() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::write(p("a"), "A").unwrap();
+    fs::write(p("b"), "B").unwrap();
+    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
+        .plan()
+        .unwrap();
+    assert!(plan.check_fs().unwrap().is_empty());
+    assert_eq!(plan.len(), 2);
+    plan.apply().unwrap();
+    assert!(!p("a").exists());
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
+}
