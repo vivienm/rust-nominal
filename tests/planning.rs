@@ -257,3 +257,22 @@ fn relative_paths_are_anchored_at_planning_time() {
     assert!(!base.join("a").exists());
     assert_eq!(fs::read_dir(".").unwrap().count(), 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn trailing_dot_components_do_not_turn_into_directory_moves() {
+    for suffix in ["/.", "/./", "/././"] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("folder");
+        let target = dir.path().join("moved");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), "data").unwrap();
+        let with_suffix = dir.path().join(format!("folder{suffix}"));
+        let plan = Renamer::from_iter([(with_suffix, target.clone())])
+            .plan()
+            .unwrap();
+        assert!(plan.apply().is_err());
+        assert_eq!(fs::read_to_string(source.join("file")).unwrap(), "data");
+        assert!(!target.exists());
+    }
+}

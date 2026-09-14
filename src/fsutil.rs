@@ -27,7 +27,10 @@ pub(crate) fn entry_path(path: &Path) -> io::Result<PathBuf> {
     // Path components omit trailing separators and `.`. Preserve these in the
     // executed path: `file/` must not silently become a valid rename of `file`.
     let raw = path.as_os_str().as_encoded_bytes();
-    if raw.ends_with(b"/.") || (cfg!(windows) && raw.ends_with(b"\\.")) {
+    let final_component = raw
+        .rsplit(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
+        .find(|component| !component.is_empty());
+    if final_component == Some(b".") {
         resolved.push(".");
     } else if raw.ends_with(b"/") || (cfg!(windows) && raw.ends_with(b"\\")) {
         resolved.push("");
