@@ -1,10 +1,78 @@
-use std::{fs, io, path::Path};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 /// Returns the common ancestor of two paths.
 pub fn common_ancestor<'a>(path_1: &'a Path, path_2: &'a Path) -> Option<&'a Path> {
     path_1
         .ancestors()
         .find(|&ancestor| !ancestor.as_os_str().is_empty() && path_2.starts_with(ancestor))
+}
+
+/// Resolves parent aliases without following the final directory entry.
+/// Missing parent directories are permitted so apply can create them later.
+pub(crate) fn entry_path(path: &Path) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path must name a directory entry",
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut resolved = resolve_directory(parent)?.join(name);
+    // Path components omit trailing separators and `.`. Preserve these in the
+    // executed path: `file/` must not silently become a valid rename of `file`.
+    let raw = path.as_os_str().as_encoded_bytes();
+    if raw.ends_with(b"/.") || (cfg!(windows) && raw.ends_with(b"\\.")) {
+        resolved.push(".");
+    } else if raw.ends_with(b"/") || (cfg!(windows) && raw.ends_with(b"\\")) {
+        resolved.push("");
+    }
+    Ok(resolved)
+}
+
+fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
+    let mut unresolved = Vec::new();
+    let mut current = path;
+    let mut resolved = loop {
+        match fs::canonicalize(current) {
+            Ok(resolved) => {
+                if !fs::metadata(&resolved)?.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        "parent is not a directory",
+                    ));
+                }
+                break resolved;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                // A dangling symlink is not a missing directory we can create.
+                match fs::symlink_metadata(current) {
+                    Err(missing) if missing.kind() == io::ErrorKind::NotFound => {}
+                    Err(other) => return Err(other),
+                    Ok(_) => return Err(err),
+                }
+                // Do not simplify `missing/..`: it does not resolve on disk.
+                let Some(name) = current.file_name() else {
+                    return Err(err);
+                };
+                unresolved.push(name);
+                current = current
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+            }
+            Err(err) => return Err(err),
+        }
+    };
+    for name in unresolved.into_iter().rev() {
+        resolved.push(name);
+    }
+    Ok(resolved)
 }
 
 /// Whether a target is occupied by an entry other than the source entry.

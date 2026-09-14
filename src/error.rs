@@ -20,6 +20,14 @@ pub enum Error {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlanError {
+    /// A parent directory could not be resolved while preparing the plan.
+    #[error("failed to resolve parent of {path:?}: {source}")]
+    ResolvePath {
+        /// The original source or target path.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        source: io::Error,
+    },
     /// An ICU error occurred while preparing the collator.
     #[cfg(feature = "unicode")]
     #[error("ICU error: {0}")]

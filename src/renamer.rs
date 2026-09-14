@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error::PlanError, operation::Rename, plan::Plan};
+use crate::{error::PlanError, fsutil::entry_path, operation::Rename, plan::Plan};
 
 /// Prepares a batch file renaming operation.
 #[derive(Debug)]
@@ -65,23 +65,45 @@ where
 {
     /// Consumes the renamer and returns a [`Plan`].
     ///
+    /// Paths are anchored to the current directory at planning time. Existing
+    /// parent directories are resolved to handle `..` and symlink aliases;
+    /// missing parent directories are allowed. The final component is kept
+    /// unchanged so symlinks themselves can be renamed. Original paths are
+    /// preserved for display and results.
+    ///
     /// # Errors
     ///
-    /// Returns a [`PlanError`] if the rename operations cannot be planned
-    /// (e.g. duplicate sources or targets, or a rename cycle).
+    /// Returns a [`PlanError`] if a parent cannot be resolved, or if operations
+    /// have duplicate sources or targets (including parent aliases), or a cycle.
+    /// A `..` component after a missing directory is rejected because its
+    /// filesystem meaning cannot be resolved.
     pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
         let mut renames = self.renames;
         renames.retain(|r| r.source.as_ref() != r.target.as_ref());
 
+        let mut paths = HashMap::with_capacity(2 * renames.len());
+        for rename in &renames {
+            for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                if !paths.contains_key(path) {
+                    let resolved = entry_path(path).map_err(|source| PlanError::ResolvePath {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                    paths.insert(path.to_path_buf(), resolved);
+                }
+            }
+        }
+        renames.retain(|r| paths[r.source.as_ref()] != paths[r.target.as_ref()]);
+
         let mut seen_sources = HashSet::with_capacity(renames.len());
         let mut seen_targets = HashSet::with_capacity(renames.len());
         for rename in &renames {
-            if !seen_sources.insert(rename.source.as_ref()) {
+            if !seen_sources.insert(&paths[rename.source.as_ref()]) {
                 return Err(PlanError::DuplicateSource {
                     path: rename.source.as_ref().to_path_buf(),
                 });
             }
-            if !seen_targets.insert(rename.target.as_ref()) {
+            if !seen_targets.insert(&paths[rename.target.as_ref()]) {
                 return Err(PlanError::DuplicateTarget {
                     path: rename.target.as_ref().to_path_buf(),
                 });
@@ -128,8 +150,8 @@ where
             renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
         }
 
-        topological_sort(&mut renames)?;
-        Ok(Plan { renames })
+        topological_sort(&mut renames, &paths)?;
+        Ok(Plan { renames, paths })
     }
 }
 
@@ -159,10 +181,13 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
     }
 }
 
-/// Reorders renames so that each operation runs after any other operation
-/// whose target is its source (which must vacate that path first). Returns
+/// Reorders renames so an operation that vacates a target runs before the
+/// operation that writes to that target. Returns
 /// [`PlanError::Cycle`] if no such ordering exists.
-fn topological_sort<S, T>(renames: &mut [Rename<S, T>]) -> Result<(), PlanError>
+fn topological_sort<S, T>(
+    renames: &mut [Rename<S, T>],
+    paths: &HashMap<PathBuf, PathBuf>,
+) -> Result<(), PlanError>
 where
     S: AsRef<Path>,
     T: AsRef<Path>,
@@ -171,14 +196,14 @@ where
     let target_to_idx: HashMap<&Path, usize> = renames
         .iter()
         .enumerate()
-        .map(|(i, r)| (r.target.as_ref(), i))
+        .map(|(i, r)| (paths[r.target.as_ref()].as_path(), i))
         .collect();
 
     let mut indegree = vec![0usize; n];
     // Each rename has a single source, so at most one outgoing edge.
     let mut successor: Vec<Option<usize>> = vec![None; n];
     for (i, rename) in renames.iter().enumerate() {
-        if let Some(&j) = target_to_idx.get(rename.source.as_ref()) {
+        if let Some(&j) = target_to_idx.get(paths[rename.source.as_ref()].as_path()) {
             // Op j wants to write to a path (T_j = S_i) that op i still reads
             // from. Op i must move it out of the way first: edge i -> j.
             successor[i] = Some(j);
