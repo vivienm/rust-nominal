@@ -45,6 +45,21 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTFLAGS: "-D warnings"
           RUSTDOCFLAGS: "-D warnings"
+      - name: "Test case-insensitive filesystem aliases"
+        shell: bash
+        run: |
+          casefold_root=$(mktemp -d)
+          truncate -s 32M "$casefold_root/fs.img"
+          mkfs.ext4 -q -F -O casefold "$casefold_root/fs.img"
+          mkdir "$casefold_root/mnt"
+          sudo mount -o loop "$casefold_root/fs.img" "$casefold_root/mnt"
+          trap 'sudo umount "$casefold_root/mnt"; rm -rf "$casefold_root"' EXIT
+          sudo mkdir "$casefold_root/mnt/data"
+          sudo chattr +F "$casefold_root/mnt/data"
+          sudo chown "$(id -u):$(id -g)" "$casefold_root/mnt/data"
+          export NOMINAL_CASE_INSENSITIVE_DIR="$casefold_root/mnt/data"
+          cargo test --test case_insensitive --all-features
+          cargo test --test case_insensitive --no-default-features
       - name: "Upload docs artifact"
         uses: "actions/upload-artifact@v7"
         with:

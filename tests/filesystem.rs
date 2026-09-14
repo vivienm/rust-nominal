@@ -218,3 +218,20 @@ fn unblocked_chain_moves_original_contents_to_their_targets() {
     assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
     assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
 }
+
+#[test]
+fn separate_hard_links_can_be_moved_independently() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::write(p("a"), "data").unwrap();
+    fs::hard_link(p("a"), p("b")).unwrap();
+    let mut plan = Renamer::from_iter([(p("a"), p("c")), (p("b"), p("d"))])
+        .plan()
+        .unwrap();
+    assert!(plan.check_fs().unwrap().is_empty());
+    plan.apply().unwrap();
+    assert!(!p("a").exists());
+    assert!(!p("b").exists());
+    assert_eq!(fs::read_to_string(p("c")).unwrap(), "data");
+    assert_eq!(fs::read_to_string(p("d")).unwrap(), "data");
+}

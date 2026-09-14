@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     error::{ApplyError, FsConflict},
-    fsutil::target_conflicts,
+    fsutil::{EntryKey, target_conflicts},
     operation::Rename,
 };
 
@@ -18,6 +18,7 @@ use crate::{
 pub struct Plan<S, T> {
     pub(crate) renames: Vec<Rename<S, T>>,
     pub(crate) paths: HashMap<OsString, PathBuf>,
+    pub(crate) keys: HashMap<OsString, EntryKey>,
 }
 
 impl<S, T> Plan<S, T> {
@@ -170,7 +171,7 @@ where
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn check_fs(&mut self) -> io::Result<Vec<FsConflict>> {
-        let mut vacated: HashSet<&Path> = HashSet::with_capacity(self.renames.len());
+        let mut vacated: HashSet<&EntryKey> = HashSet::with_capacity(self.renames.len());
 
         // Mark conflicts in a first pass so the immutable borrow on
         // `self.renames` is released before we start moving entries.
@@ -181,14 +182,14 @@ where
             // The plan is in execution order. Only retained earlier operations
             // will vacate their sources; a rejected operation cannot unblock
             // the rest of its chain.
-            let conflict = if vacated.contains(target) {
+            let conflict = if vacated.contains(&self.keys[rename.target.as_ref().as_os_str()]) {
                 false
             } else {
                 target_conflicts(source, target)?
             };
             is_conflict.push(conflict);
             if !conflict {
-                vacated.insert(source);
+                vacated.insert(&self.keys[rename.source.as_ref().as_os_str()]);
             }
         }
         drop(vacated);

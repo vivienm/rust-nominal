@@ -78,6 +78,78 @@ fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
+/// The on-disk anchor and unresolved suffix of a directory entry.
+/// Keep this separate from execution paths, which retain the requested spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct EntryKey {
+    anchor: EntryAnchor,
+    suffix: PathBuf,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct EntryAnchor {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(not(unix))]
+type EntryAnchor = PathBuf;
+
+#[cfg(unix)]
+fn entry_anchor(_path: &Path, metadata: &fs::Metadata) -> io::Result<Option<EntryAnchor>> {
+    use std::os::unix::fs::MetadataExt;
+
+    // Hard links are separate directory entries. Use their parent and name
+    // instead of their shared inode, matching same_entry's conservative rule.
+    Ok(
+        (metadata.is_dir() || metadata.nlink() == 1).then(|| EntryAnchor {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        }),
+    )
+}
+
+#[cfg(not(unix))]
+fn entry_anchor(path: &Path, metadata: &fs::Metadata) -> io::Result<Option<EntryAnchor>> {
+    // Windows canonicalization resolves stored case, but follows symlinks.
+    // Keep symlink names distinct, as in same_entry on these platforms.
+    if metadata.is_symlink() {
+        Ok(None)
+    } else {
+        fs::canonicalize(path).map(Some)
+    }
+}
+
+/// Identify existing case aliases without opening files or following the final
+/// symlink. Missing suffixes retain their spelling under an existing anchor.
+pub(crate) fn entry_key(path: &Path) -> io::Result<EntryKey> {
+    // Suffix constraints affect execution, not the dependency graph.
+    let normalized: PathBuf = path.components().collect();
+    let mut current = normalized.as_path();
+    let mut suffix = Vec::new();
+    let anchor = loop {
+        match fs::symlink_metadata(current) {
+            Ok(metadata) => {
+                if let Some(anchor) = entry_anchor(current, &metadata)? {
+                    break anchor;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        let name = current.file_name().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path has no existing anchor")
+        })?;
+        suffix.push(name);
+        current = current.parent().expect("entry has a parent");
+    };
+    Ok(EntryKey {
+        anchor,
+        suffix: suffix.into_iter().rev().collect(),
+    })
+}
+
 /// Whether a target is occupied by an entry other than the source entry.
 /// Inspect the directory entries themselves, including dangling symlinks.
 pub(crate) fn target_conflicts(source: &Path, target: &Path) -> io::Result<bool> {
@@ -120,16 +192,18 @@ fn same_entry(
     if !source_metadata.is_dir() && source_metadata.nlink() != 1 {
         return Ok(false);
     }
-    // A case-only change must remain within the same directory. Canonicalize
-    // only the parents: canonicalizing the entries would follow symlinks.
+    // A case-only change must remain within the same directory. Compare parent
+    // identities too: canonicalize need not resolve stored case on Unix.
     let parent = |path: &Path| {
-        fs::canonicalize(
+        fs::metadata(
             path.parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .unwrap_or(Path::new(".")),
         )
     };
-    Ok(parent(source)? == parent(target)?)
+    let source_parent = parent(source)?;
+    let target_parent = parent(target)?;
+    Ok(source_parent.dev() == target_parent.dev() && source_parent.ino() == target_parent.ino())
 }
 
 #[cfg(not(unix))]

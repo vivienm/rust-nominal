@@ -4,7 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{error::PlanError, fsutil::entry_path, operation::Rename, plan::Plan};
+use crate::{
+    error::PlanError,
+    fsutil::{EntryKey, entry_key, entry_path},
+    operation::Rename,
+    plan::Plan,
+};
 
 /// Prepares a batch file renaming operation.
 #[derive(Debug)]
@@ -78,6 +83,11 @@ where
     /// must validate those destinations against their own directory policy.
     /// Resolving aliases is not a confinement check.
     ///
+    /// Existing case aliases are identified from filesystem metadata, using
+    /// the same conservative hard-link and symlink rules as [`Plan::check_fs`].
+    /// Missing names are compared by spelling; case aliases between missing
+    /// names can therefore collide only at execution time.
+    ///
     /// A batch cannot contain a source or target that is a strict ancestor
     /// of another source or target. This includes nested destinations such
     /// as `out` and `out/child`, even when the source of `out` is a directory.
@@ -107,21 +117,30 @@ where
             }
         }
         // Execution paths must retain trailing separators and dots even though
-        // Path equality normalizes them. Graph comparisons still use Path.
+        // Path equality normalizes them.
         renames.retain(|r| {
             paths[r.source.as_ref().as_os_str()].as_os_str()
                 != paths[r.target.as_ref().as_os_str()].as_os_str()
         });
 
+        let mut keys = HashMap::with_capacity(paths.len());
+        for (original, resolved) in &paths {
+            let key = entry_key(resolved).map_err(|source| PlanError::ResolvePath {
+                path: PathBuf::from(original),
+                source,
+            })?;
+            keys.insert(original.clone(), key);
+        }
+
         let mut seen_sources = HashSet::with_capacity(renames.len());
         let mut seen_targets = HashSet::with_capacity(renames.len());
         for rename in &renames {
-            if !seen_sources.insert(&paths[rename.source.as_ref().as_os_str()]) {
+            if !seen_sources.insert(&keys[rename.source.as_ref().as_os_str()]) {
                 return Err(PlanError::DuplicateSource {
                     path: rename.source.as_ref().to_path_buf(),
                 });
             }
-            if !seen_targets.insert(&paths[rename.target.as_ref().as_os_str()]) {
+            if !seen_targets.insert(&keys[rename.target.as_ref().as_os_str()]) {
                 return Err(PlanError::DuplicateTarget {
                     path: rename.target.as_ref().to_path_buf(),
                 });
@@ -133,15 +152,17 @@ where
         let mut endpoints = HashMap::with_capacity(2 * renames.len());
         for rename in &renames {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                endpoints
-                    .entry(paths[path.as_os_str()].as_path())
-                    .or_insert(path);
+                endpoints.entry(&keys[path.as_os_str()]).or_insert(path);
             }
         }
         for rename in &renames {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
                 for ancestor in paths[path.as_os_str()].ancestors().skip(1) {
-                    if let Some(original) = endpoints.get(ancestor) {
+                    let key = entry_key(ancestor).map_err(|source| PlanError::ResolvePath {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+                    if let Some(original) = endpoints.get(&key) {
                         return Err(PlanError::OverlappingPaths {
                             ancestor_path: original.to_path_buf(),
                             descendant_path: path.to_path_buf(),
@@ -191,8 +212,12 @@ where
             renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
         }
 
-        topological_sort(&mut renames, &paths)?;
-        Ok(Plan { renames, paths })
+        topological_sort(&mut renames, &keys)?;
+        Ok(Plan {
+            renames,
+            paths,
+            keys,
+        })
     }
 }
 
@@ -227,24 +252,24 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
 /// [`PlanError::Cycle`] if no such ordering exists.
 fn topological_sort<S, T>(
     renames: &mut [Rename<S, T>],
-    paths: &HashMap<OsString, PathBuf>,
+    keys: &HashMap<OsString, EntryKey>,
 ) -> Result<(), PlanError>
 where
     S: AsRef<Path>,
     T: AsRef<Path>,
 {
     let n = renames.len();
-    let target_to_idx: HashMap<&Path, usize> = renames
+    let target_to_idx: HashMap<&EntryKey, usize> = renames
         .iter()
         .enumerate()
-        .map(|(i, r)| (paths[r.target.as_ref().as_os_str()].as_path(), i))
+        .map(|(i, r)| (&keys[r.target.as_ref().as_os_str()], i))
         .collect();
 
     let mut indegree = vec![0usize; n];
     // Each rename has a single source, so at most one outgoing edge.
     let mut successor: Vec<Option<usize>> = vec![None; n];
     for (i, rename) in renames.iter().enumerate() {
-        if let Some(&j) = target_to_idx.get(paths[rename.source.as_ref().as_os_str()].as_path()) {
+        if let Some(&j) = target_to_idx.get(&keys[rename.source.as_ref().as_os_str()]) {
             // Spelling-only operations can refer to their own entry.
             if i == j {
                 continue;
