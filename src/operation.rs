@@ -8,7 +8,9 @@ use crate::{
 /// A rename operation.
 #[derive(Debug)]
 pub struct Rename<S, T> {
+    /// The path to rename.
     pub source: S,
+    /// The destination path.
     pub target: T,
 }
 
@@ -24,6 +26,7 @@ where
     S: AsRef<Path>,
     T: AsRef<Path>,
 {
+    /// Writes the rename operation to the specified writer.
     pub fn write_to<W>(&self, writer: &mut W) -> std::io::Result<()>
     where
         W: std::io::Write,
@@ -31,6 +34,7 @@ where
         writeln!(writer, "{}", self)
     }
 
+    /// Writes the rename operation to the specified writer, with ANSI colors.
     #[cfg(feature = "ansi")]
     pub fn write_colored_to<W>(
         &self,

@@ -36,6 +36,7 @@ mod renamer;
 
 pub use self::{
     error::{ApplyError, Error, FsConflict, PlanError, RenameError},
-    plan::Plan,
+    operation::Rename,
+    plan::{ApplyIter, Plan},
     renamer::Renamer,
 };
