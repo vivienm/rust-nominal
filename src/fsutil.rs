@@ -153,23 +153,39 @@ pub(crate) fn entry_key(path: &Path) -> io::Result<EntryKey> {
 /// Whether a target is occupied by an entry other than the source entry.
 /// Inspect the directory entries themselves, including dangling symlinks.
 pub(crate) fn target_conflicts(source: &Path, target: &Path) -> io::Result<bool> {
+    Ok(matches!(
+        target_state(source, target)?,
+        TargetState::Conflict
+    ))
+}
+
+/// Occupancy of a target, distinguishing case aliases from free destinations.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TargetState {
+    Missing,
+    SameEntry,
+    Conflict,
+}
+
+pub(crate) fn target_state(source: &Path, target: &Path) -> io::Result<TargetState> {
     let target_metadata = match fs::symlink_metadata(target) {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(TargetState::Missing),
         Err(err) => return Err(err),
     };
     let source_metadata = match fs::symlink_metadata(source) {
         Ok(metadata) => metadata,
         // A missing source must never hide an occupied target.
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(TargetState::Conflict),
         Err(err) => return Err(err),
     };
-    Ok(!same_entry(
-        source,
-        target,
-        &source_metadata,
-        &target_metadata,
-    )?)
+    Ok(
+        if same_entry(source, target, &source_metadata, &target_metadata)? {
+            TargetState::SameEntry
+        } else {
+            TargetState::Conflict
+        },
+    )
 }
 
 #[cfg(unix)]

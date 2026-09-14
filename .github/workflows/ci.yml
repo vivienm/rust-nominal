@@ -58,8 +58,9 @@ jobs:
           sudo chattr +F "$casefold_root/mnt/data"
           sudo chown "$(id -u):$(id -g)" "$casefold_root/mnt/data"
           export NOMINAL_CASE_INSENSITIVE_DIR="$casefold_root/mnt/data"
-          cargo test --test case_insensitive --all-features
-          cargo test --test case_insensitive --no-default-features
+          export TMPDIR="$NOMINAL_CASE_INSENSITIVE_DIR"
+          cargo test --lib --tests --all-features
+          cargo test --lib --tests --no-default-features
       - name: "Upload docs artifact"
         uses: "actions/upload-artifact@v7"
         with:

@@ -2,7 +2,7 @@ use std::{fmt, fs, path::Path};
 
 use crate::{
     error::RenameError,
-    fsutil::{common_ancestor, target_conflicts},
+    fsutil::{TargetState, common_ancestor, entry_path, target_state},
 };
 
 /// A rename operation.
@@ -91,12 +91,31 @@ where
     /// This check and the rename itself are not atomic:
     /// a concurrent process creating the target between the two calls
     /// can still be overwritten.
+    ///
+    /// When source and target are spelling variants of the same entry, the
+    /// rename uses a temporary name beside the source. This ensures the
+    /// stored spelling changes even on filesystems where a direct rename is
+    /// a no-op. The entry is briefly absent from its original path. If the
+    /// final move fails, restoration to the source path is attempted. If that
+    /// also fails, [`RenameError::RecoveryFailed`] reports where the entry was
+    /// retained; it is never deleted by temporary-directory cleanup.
     pub fn apply(&self) -> Result<(), RenameError> {
         let source = self.source.as_ref();
         let target = self.target.as_ref();
 
-        if target_conflicts(source, target)? {
-            return Err(RenameError::TargetExists);
+        match target_state(source, target)? {
+            TargetState::Conflict => return Err(RenameError::TargetExists),
+            TargetState::SameEntry
+                if source.file_name().is_some() && source.file_name() != target.file_name() =>
+            {
+                // Anchor both paths before staging, including for direct Rename users.
+                return rename_via_temporary(
+                    &entry_path(source)?,
+                    &entry_path(target)?,
+                    rename_to_free_target,
+                );
+            }
+            _ => {}
         }
 
         if let Some(target_parent) = target.parent()
@@ -108,6 +127,48 @@ where
         tracing::debug!("renaming {} to {}", source.display(), target.display());
         fs::rename(source, target)?;
         Ok(())
+    }
+}
+
+/// Each stage rechecks occupancy, including when restoring the source.
+fn rename_to_free_target(source: &Path, target: &Path) -> Result<(), RenameError> {
+    // Each stage must actually vacate its source, so even an alias appearing
+    // at the destination is a conflict here rather than a successful no-op.
+    if target_state(source, target)? != TargetState::Missing {
+        return Err(RenameError::TargetExists);
+    }
+    tracing::debug!("renaming {} to {}", source.display(), target.display());
+    fs::rename(source, target)?;
+    Ok(())
+}
+
+fn rename_via_temporary(
+    source: &Path,
+    target: &Path,
+    mut rename: impl FnMut(&Path, &Path) -> Result<(), RenameError>,
+) -> Result<(), RenameError> {
+    let parent = source.parent().expect("resolved entry has a parent");
+    // Reserve a unique sibling name, then release the empty placeholder before
+    // moving anything. Keep it out of TempDir's recursive cleanup: a failed
+    // recovery must leave user data at the reported temporary path.
+    // A sibling also preserves relative symlink meaning and avoids requiring
+    // write permission on a moved directory just to update its `..` entry.
+    let temporary = tempfile::Builder::new()
+        .prefix(".nominal-")
+        .tempdir_in(parent)?
+        .keep();
+    fs::remove_dir(&temporary)?;
+    rename(source, &temporary)?;
+    match rename(&temporary, target) {
+        Ok(()) => Ok(()),
+        Err(error) => match rename(&temporary, source) {
+            Ok(()) => Err(error),
+            Err(recovery_error) => Err(RenameError::RecoveryFailed {
+                temporary_path: temporary,
+                source: Box::new(error),
+                recovery_error: Box::new(recovery_error),
+            }),
+        },
     }
 }
 
@@ -190,7 +251,101 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Rename;
+    use std::{fs, io};
+
+    use super::{Rename, rename_to_free_target, rename_via_temporary};
+    use crate::RenameError;
+
+    #[test]
+    fn failed_staging_leaves_source_and_removes_temporary_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::write(&source, "original").unwrap();
+        let result = rename_via_temporary(&source, &target, |_, _| {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied).into())
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_final_move_restores_source_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::write(&source, "original").unwrap();
+        let mut calls = 0;
+        let result = rename_via_temporary(&source, &target, |from, to| {
+            calls += 1;
+            if calls == 2 {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+            }
+            rename_to_free_target(from, to)
+        });
+        assert!(
+            matches!(result, Err(RenameError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn target_created_during_staging_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::write(&source, "original").unwrap();
+        let mut calls = 0;
+        let result = rename_via_temporary(&source, &target, |from, to| {
+            calls += 1;
+            if calls == 2 {
+                fs::write(&target, "new target").unwrap();
+            }
+            rename_to_free_target(from, to)
+        });
+        assert!(matches!(result, Err(RenameError::TargetExists)));
+        assert_eq!(fs::read_to_string(&source).unwrap(), "original");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new target");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn failed_recovery_retains_data_and_reports_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("contents"), "original").unwrap();
+        let mut calls = 0;
+        let error = rename_via_temporary(&source, &target, |from, to| {
+            calls += 1;
+            if calls == 2 {
+                fs::write(&target, "new target").unwrap();
+                fs::write(&source, "new source").unwrap();
+            }
+            rename_to_free_target(from, to)
+        })
+        .unwrap_err();
+        let RenameError::RecoveryFailed {
+            temporary_path,
+            source: cause,
+            recovery_error,
+        } = error
+        else {
+            panic!("expected a recovery error: {error:?}");
+        };
+        assert!(matches!(*cause, RenameError::TargetExists));
+        assert!(matches!(*recovery_error, RenameError::TargetExists));
+        assert!(temporary_path.is_absolute());
+        assert_eq!(
+            fs::read_to_string(temporary_path.join("contents")).unwrap(),
+            "original"
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "new source");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new target");
+    }
 
     #[test]
     fn display_factors_non_trivial_common_prefix() {

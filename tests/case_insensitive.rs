@@ -99,6 +99,11 @@ fn case_only_rename_is_not_a_cycle_or_noop() {
     assert!(plan.check_fs().unwrap().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("LOWER")).unwrap(), "data");
+    let names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["LOWER"]);
 }
 
 #[test]
@@ -157,4 +162,93 @@ fn case_alias_parents_do_not_create_false_conflicts() {
     assert!(plan.check_fs().unwrap().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("folder/A")).unwrap(), "data");
+}
+
+#[test]
+fn case_only_directory_rename_preserves_contents_and_spelling() {
+    let Some(dir) = case_insensitive_dir() else {
+        return;
+    };
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("folder")).unwrap();
+    fs::write(p("folder/file"), "data").unwrap();
+    nominal::Rename::new(p("folder"), p("FOLDER"))
+        .apply()
+        .unwrap();
+    assert_eq!(fs::read_to_string(p("FOLDER/file")).unwrap(), "data");
+    let names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["FOLDER"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn case_only_symlink_rename_preserves_the_link_itself() {
+    use std::os::unix::fs::symlink;
+    for referent in ["missing", "file"] {
+        let Some(dir) = case_insensitive_dir() else {
+            return;
+        };
+        let p = |name| dir.path().join(name);
+        fs::write(p("file"), "data").unwrap();
+        symlink(referent, p("link")).unwrap();
+        nominal::Rename::new(p("link"), p("LINK")).apply().unwrap();
+        assert_eq!(
+            fs::read_link(p("LINK")).unwrap(),
+            std::path::Path::new(referent)
+        );
+        let mut names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["LINK", "file"]);
+        assert_eq!(fs::read_to_string(p("file")).unwrap(), "data");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_case_alias_suffixes_leave_directory_contents_in_place() {
+    for (source, target) in [("folder/.", "FOLDER"), ("folder", "FOLDER/.")] {
+        let Some(dir) = case_insensitive_dir() else {
+            return;
+        };
+        let p = |name: &str| dir.path().join(name);
+        fs::create_dir(p("folder")).unwrap();
+        fs::write(p("folder/file"), "data").unwrap();
+        assert!(nominal::Rename::new(p(source), p(target)).apply().is_err());
+        assert_eq!(fs::read_to_string(p("folder/file")).unwrap(), "data");
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["folder"]);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn case_only_directory_rename_does_not_require_writing_its_contents() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(dir) = case_insensitive_dir() else {
+        return;
+    };
+    let source = dir.path().join("folder");
+    let target = dir.path().join("FOLDER");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("file"), "data").unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = nominal::Rename::new(&source, &target).apply();
+    // Restore permissions for TempDir cleanup, even if the assertion fails.
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+    result.unwrap();
+    let names: Vec<_> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["FOLDER"]);
+    assert_eq!(fs::read_to_string(target.join("file")).unwrap(), "data");
 }

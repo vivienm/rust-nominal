@@ -218,6 +218,9 @@ where
     /// but this check is not atomic with the rename itself: a concurrent
     /// process creating the target in between can still be overwritten.
     ///
+    /// Case-only changes may use a temporary name; see [`Rename::apply`]
+    /// for visibility and recovery behavior during those operations.
+    ///
     /// If a rename fails partway through, the operations applied so far are
     /// not rolled back.
     ///

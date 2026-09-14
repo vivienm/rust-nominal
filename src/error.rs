@@ -97,6 +97,20 @@ pub enum RenameError {
     /// The target path already exists.
     #[error("target already exists")]
     TargetExists,
+    /// A staged rename failed and the source could not be restored.
+    /// The entry is retained at `temporary_path` for manual recovery.
+    #[error(
+        "rename failed: {source}; restoring the source failed: {recovery_error}; entry retained at {temporary_path:?}"
+    )]
+    RecoveryFailed {
+        /// The absolute temporary path where the entry remains.
+        temporary_path: PathBuf,
+        /// The failure while moving the staged entry to its destination.
+        #[source]
+        source: Box<RenameError>,
+        /// The failure while restoring the entry to the source path.
+        recovery_error: Box<RenameError>,
+    },
     /// An I/O error occurred.
     #[error("{0}")]
     Io(#[from] io::Error),
