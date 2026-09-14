@@ -71,6 +71,12 @@ where
     /// unchanged so symlinks themselves can be renamed. Original paths are
     /// preserved for display and results.
     ///
+    /// Paths are not confined to a library or working directory: absolute
+    /// destinations and `..` in existing parent directories are supported.
+    /// Callers deriving destinations from metadata or other external input
+    /// must validate those destinations against their own directory policy.
+    /// Resolving aliases is not a confinement check.
+    ///
     /// A batch cannot contain a source or target that is a strict ancestor
     /// of another source or target. This includes nested destinations such
     /// as `out` and `out/child`, even when the source of `out` is a directory.

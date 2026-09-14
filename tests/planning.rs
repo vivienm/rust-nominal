@@ -5,6 +5,40 @@ use std::fs;
 use nominal::{PlanError, Renamer};
 
 #[test]
+fn parent_destinations_are_supported_but_existing_files_are_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let library = dir.path().join("library");
+    fs::create_dir(&library).unwrap();
+    let source = library.join("input.epub");
+    let target = library.join("../book.epub");
+    fs::write(&source, "new book").unwrap();
+
+    // Nominal is a general-purpose renamer; confinement is the caller's policy.
+    let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
+    assert!(plan.check_fs().unwrap().is_empty());
+    plan.apply().unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("book.epub")).unwrap(),
+        "new book"
+    );
+    assert!(!source.exists());
+
+    fs::write(&source, "another book").unwrap();
+    let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
+    assert_eq!(plan.check_fs().unwrap().len(), 1);
+    assert!(plan.is_empty());
+    assert!(
+        Renamer::from_iter([(&source, &target)])
+            .plan()
+            .unwrap()
+            .apply()
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(&source).unwrap(), "another book");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "new book");
+}
+
+#[test]
 fn parent_aliases_form_a_valid_chain_with_or_without_check_fs() {
     for check in [false, true] {
         let dir = tempfile::tempdir().unwrap();

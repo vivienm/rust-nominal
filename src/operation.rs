@@ -83,6 +83,9 @@ where
 
     /// Executes the rename operation.
     ///
+    /// Source and target paths are unrestricted. Callers must enforce any
+    /// required directory confinement before passing paths to this method.
+    ///
     /// The target is checked for existence before renaming to avoid
     /// overwriting it, using the same conflict rules as [`crate::Plan::check_fs`].
     /// This check and the rename itself are not atomic:
