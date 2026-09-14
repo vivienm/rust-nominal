@@ -310,3 +310,66 @@ fn trailing_dot_components_do_not_turn_into_directory_moves() {
         assert!(!target.exists());
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn batch_cache_preserves_each_sources_directory_suffix() {
+    for suffix in ["/", "/.", "/./"] {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = |name: &str| dir.path().join(name);
+            fs::write(p("a"), "A").unwrap();
+            fs::write(p("b"), "B").unwrap();
+            let mut renames = [(p("a"), p("b")), (p(&format!("b{suffix}")), p("c"))];
+            if reverse {
+                renames.reverse();
+            }
+            let plan = Renamer::from_iter(renames).plan().unwrap();
+            assert!(plan.apply().is_err());
+            assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
+            assert_eq!(fs::read_to_string(p("b")).unwrap(), "B");
+            assert!(!p("c").exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn batch_cache_preserves_each_targets_directory_suffix() {
+    for suffix in ["/", "/.", "/./"] {
+        for reverse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = |name: &str| dir.path().join(name);
+            fs::write(p("a"), "A").unwrap();
+            fs::write(p("b"), "B").unwrap();
+            let mut renames = [(p("b"), p("c")), (p("a"), p(&format!("b{suffix}")))];
+            if reverse {
+                renames.reverse();
+            }
+            let outcomes: Vec<_> = Renamer::from_iter(renames)
+                .plan()
+                .unwrap()
+                .apply_iter()
+                .collect();
+            assert!(outcomes[0].is_ok());
+            assert!(outcomes[1].is_err());
+            assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
+            assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn directory_suffix_differences_are_not_discarded_as_noops() {
+    for (source, target) in [("a", "a/"), ("a/.", "a")] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "A").unwrap();
+        let plan = Renamer::from_iter([(dir.path().join(source), dir.path().join(target))])
+            .plan()
+            .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert!(plan.apply().is_err());
+        assert_eq!(fs::read_to_string(dir.path().join("a")).unwrap(), "A");
+    }
+}

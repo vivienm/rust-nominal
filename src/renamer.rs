@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -91,31 +92,36 @@ where
     /// filesystem meaning cannot be resolved.
     pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
         let mut renames = self.renames;
-        renames.retain(|r| r.source.as_ref() != r.target.as_ref());
+        renames.retain(|r| r.source.as_ref().as_os_str() != r.target.as_ref().as_os_str());
 
         let mut paths = HashMap::with_capacity(2 * renames.len());
         for rename in &renames {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                if !paths.contains_key(path) {
+                if !paths.contains_key(path.as_os_str()) {
                     let resolved = entry_path(path).map_err(|source| PlanError::ResolvePath {
                         path: path.to_path_buf(),
                         source,
                     })?;
-                    paths.insert(path.to_path_buf(), resolved);
+                    paths.insert(path.as_os_str().to_os_string(), resolved);
                 }
             }
         }
-        renames.retain(|r| paths[r.source.as_ref()] != paths[r.target.as_ref()]);
+        // Execution paths must retain trailing separators and dots even though
+        // Path equality normalizes them. Graph comparisons still use Path.
+        renames.retain(|r| {
+            paths[r.source.as_ref().as_os_str()].as_os_str()
+                != paths[r.target.as_ref().as_os_str()].as_os_str()
+        });
 
         let mut seen_sources = HashSet::with_capacity(renames.len());
         let mut seen_targets = HashSet::with_capacity(renames.len());
         for rename in &renames {
-            if !seen_sources.insert(&paths[rename.source.as_ref()]) {
+            if !seen_sources.insert(&paths[rename.source.as_ref().as_os_str()]) {
                 return Err(PlanError::DuplicateSource {
                     path: rename.source.as_ref().to_path_buf(),
                 });
             }
-            if !seen_targets.insert(&paths[rename.target.as_ref()]) {
+            if !seen_targets.insert(&paths[rename.target.as_ref().as_os_str()]) {
                 return Err(PlanError::DuplicateTarget {
                     path: rename.target.as_ref().to_path_buf(),
                 });
@@ -127,12 +133,14 @@ where
         let mut endpoints = HashMap::with_capacity(2 * renames.len());
         for rename in &renames {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                endpoints.entry(paths[path].as_path()).or_insert(path);
+                endpoints
+                    .entry(paths[path.as_os_str()].as_path())
+                    .or_insert(path);
             }
         }
         for rename in &renames {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                for ancestor in paths[path].ancestors().skip(1) {
+                for ancestor in paths[path.as_os_str()].ancestors().skip(1) {
                     if let Some(original) = endpoints.get(ancestor) {
                         return Err(PlanError::OverlappingPaths {
                             ancestor_path: original.to_path_buf(),
@@ -219,7 +227,7 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
 /// [`PlanError::Cycle`] if no such ordering exists.
 fn topological_sort<S, T>(
     renames: &mut [Rename<S, T>],
-    paths: &HashMap<PathBuf, PathBuf>,
+    paths: &HashMap<OsString, PathBuf>,
 ) -> Result<(), PlanError>
 where
     S: AsRef<Path>,
@@ -229,14 +237,18 @@ where
     let target_to_idx: HashMap<&Path, usize> = renames
         .iter()
         .enumerate()
-        .map(|(i, r)| (paths[r.target.as_ref()].as_path(), i))
+        .map(|(i, r)| (paths[r.target.as_ref().as_os_str()].as_path(), i))
         .collect();
 
     let mut indegree = vec![0usize; n];
     // Each rename has a single source, so at most one outgoing edge.
     let mut successor: Vec<Option<usize>> = vec![None; n];
     for (i, rename) in renames.iter().enumerate() {
-        if let Some(&j) = target_to_idx.get(paths[rename.source.as_ref()].as_path()) {
+        if let Some(&j) = target_to_idx.get(paths[rename.source.as_ref().as_os_str()].as_path()) {
+            // Spelling-only operations can refer to their own entry.
+            if i == j {
+                continue;
+            }
             // Op j wants to write to a path (T_j = S_i) that op i still reads
             // from. Op i must move it out of the way first: edge i -> j.
             successor[i] = Some(j);

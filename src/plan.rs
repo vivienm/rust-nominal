@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     vec,
@@ -16,7 +17,7 @@ use crate::{
 #[must_use]
 pub struct Plan<S, T> {
     pub(crate) renames: Vec<Rename<S, T>>,
-    pub(crate) paths: HashMap<PathBuf, PathBuf>,
+    pub(crate) paths: HashMap<OsString, PathBuf>,
 }
 
 impl<S, T> Plan<S, T> {
@@ -175,8 +176,8 @@ where
         // `self.renames` is released before we start moving entries.
         let mut is_conflict = Vec::with_capacity(self.renames.len());
         for rename in &self.renames {
-            let source = self.paths[rename.source.as_ref()].as_path();
-            let target = self.paths[rename.target.as_ref()].as_path();
+            let source = self.paths[rename.source.as_ref().as_os_str()].as_path();
+            let target = self.paths[rename.target.as_ref().as_os_str()].as_path();
             // The plan is in execution order. Only retained earlier operations
             // will vacate their sources; a rejected operation cannot unblock
             // the rest of its chain.
@@ -308,7 +309,7 @@ where
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct ApplyIter<S, T> {
     iter: vec::IntoIter<Rename<S, T>>,
-    paths: HashMap<PathBuf, PathBuf>,
+    paths: HashMap<OsString, PathBuf>,
 }
 
 impl<S, T> Iterator for ApplyIter<S, T>
@@ -321,8 +322,8 @@ where
     fn next(&mut self) -> Option<Self::Item> {
         let rename = self.iter.next()?;
         let resolved = Rename::new(
-            &self.paths[rename.source.as_ref()],
-            &self.paths[rename.target.as_ref()],
+            &self.paths[rename.source.as_ref().as_os_str()],
+            &self.paths[rename.target.as_ref().as_os_str()],
         );
         Some(match resolved.apply() {
             Ok(()) => Ok(rename),
