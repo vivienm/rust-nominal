@@ -77,6 +77,8 @@ where
     /// want to continue with independent valid operations. No-op operations
     /// are omitted; every rejected operation is reported exactly once.
     /// Duplicate contenders are all rejected, including intersecting groups.
+    /// Resolvable endpoints still participate in duplicate and overlap checks
+    /// when an operation's other endpoint cannot be resolved.
     /// Occupied targets and filesystem inspection failures are collected too.
     /// Rejected operations cannot unblock dependent renames.
     ///
@@ -109,69 +111,87 @@ where
         let mut paths = HashMap::with_capacity(2 * self.renames.len());
         let mut keys = HashMap::with_capacity(2 * self.renames.len());
         let mut renames = Vec::with_capacity(self.renames.len());
-        let mut rejections = Vec::new();
+        let mut resolution_errors = Vec::new();
         for rename in self.renames {
             if rename.source.as_ref().as_os_str() == rename.target.as_ref().as_os_str() {
                 continue;
             }
-            let mut resolve = || -> Result<bool, PlanError> {
-                for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                    if !paths.contains_key(path.as_os_str()) {
-                        let resolved =
-                            entry_path(path).map_err(|source| PlanError::ResolvePath {
+            let mut error = None;
+            // Resolve both endpoints independently: a failure at one end must
+            // not hide conflicts involving the other end.
+            for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                if !paths.contains_key(path.as_os_str()) {
+                    match entry_path(path) {
+                        Ok(resolved) => {
+                            paths.insert(path.as_os_str().to_os_string(), resolved);
+                        }
+                        Err(source) => {
+                            error.get_or_insert_with(|| PlanError::ResolvePath {
                                 path: path.to_path_buf(),
                                 source,
-                            })?;
-                        paths.insert(path.as_os_str().to_os_string(), resolved);
+                            });
+                        }
                     }
                 }
-                // Compare execution spellings, retaining trailing constraints.
-                if paths[rename.source.as_ref().as_os_str()].as_os_str()
-                    == paths[rename.target.as_ref().as_os_str()].as_os_str()
-                {
-                    return Ok(false);
-                }
-                for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                    if !keys.contains_key(path.as_os_str()) {
-                        let key = entry_key(&paths[path.as_os_str()]).map_err(|source| {
-                            PlanError::ResolvePath {
-                                path: path.to_path_buf(),
-                                source,
-                            }
-                        })?;
-                        keys.insert(path.as_os_str().to_os_string(), key);
-                    }
-                }
-                Ok(true)
-            };
-            match resolve() {
-                Ok(true) => renames.push(rename),
-                Ok(false) => {}
-                Err(error) => rejections.push(Rejection {
-                    renames: vec![rename],
-                    reason: error.into(),
-                }),
             }
+            // Compare execution spellings, retaining trailing constraints.
+            if error.is_none()
+                && paths[rename.source.as_ref().as_os_str()].as_os_str()
+                    == paths[rename.target.as_ref().as_os_str()].as_os_str()
+            {
+                continue;
+            }
+            for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                if let Some(resolved) = paths.get(path.as_os_str())
+                    && !keys.contains_key(path.as_os_str())
+                {
+                    match entry_key(resolved) {
+                        Ok(key) => {
+                            keys.insert(path.as_os_str().to_os_string(), key);
+                        }
+                        Err(source) => {
+                            error.get_or_insert_with(|| PlanError::ResolvePath {
+                                path: path.to_path_buf(),
+                                source,
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(error) = error {
+                resolution_errors.push((renames.len(), error));
+            }
+            renames.push(rename);
         }
 
         let mut rejected = RejectionTracker::new(renames.len());
+        for (index, error) in resolution_errors {
+            rejected.mark([index], error);
+        }
         let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
         let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
         let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
         for (index, rename) in renames.iter().enumerate() {
-            let source = &keys[rename.source.as_ref().as_os_str()];
-            let target = &keys[rename.target.as_ref().as_os_str()];
-            sources.entry(source).or_default().push(index);
-            targets.entry(target).or_default().push(index);
-            endpoints.entry(source).or_default().push(index);
-            if target != source {
-                endpoints.entry(target).or_default().push(index);
+            let source = keys.get(rename.source.as_ref().as_os_str());
+            let target = keys.get(rename.target.as_ref().as_os_str());
+            if let Some(source) = source {
+                sources.entry(source).or_default().push(index);
+                endpoints.entry(source).or_default().push(index);
+            }
+            if let Some(target) = target {
+                targets.entry(target).or_default().push(index);
+                if Some(target) != source {
+                    endpoints.entry(target).or_default().push(index);
+                }
             }
         }
         // Visit in input order, not HashMap iteration order, for stable reports.
         for (index, rename) in renames.iter().enumerate() {
-            let source_group = &sources[&keys[rename.source.as_ref().as_os_str()]];
-            if source_group.len() > 1 && source_group[0] == index {
+            if let Some(key) = keys.get(rename.source.as_ref().as_os_str())
+                && let source_group = &sources[key]
+                && source_group.len() > 1
+                && source_group[0] == index
+            {
                 rejected.mark(
                     source_group.iter().copied(),
                     PlanError::DuplicateSource {
@@ -179,8 +199,11 @@ where
                     },
                 );
             }
-            let target_group = &targets[&keys[rename.target.as_ref().as_os_str()]];
-            if target_group.len() > 1 && target_group[0] == index {
+            if let Some(key) = keys.get(rename.target.as_ref().as_os_str())
+                && let target_group = &targets[key]
+                && target_group.len() > 1
+                && target_group[0] == index
+            {
                 rejected.mark(
                     target_group.iter().copied(),
                     PlanError::DuplicateTarget {
@@ -191,7 +214,10 @@ where
         }
         for (index, rename) in renames.iter().enumerate() {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                for ancestor in paths[path.as_os_str()].ancestors().skip(1) {
+                let Some(resolved) = paths.get(path.as_os_str()) else {
+                    continue;
+                };
+                for ancestor in resolved.ancestors().skip(1) {
                     let key = match entry_key(ancestor) {
                         Ok(key) => key,
                         Err(source) => {
@@ -207,7 +233,8 @@ where
                     };
                     if let Some(owners) = endpoints.get(&key) {
                         let owner = &renames[owners[0]];
-                        let original = if keys[owner.source.as_ref().as_os_str()] == key {
+                        let original = if keys.get(owner.source.as_ref().as_os_str()) == Some(&key)
+                        {
                             owner.source.as_ref()
                         } else {
                             owner.target.as_ref()
@@ -223,8 +250,7 @@ where
                 }
             }
         }
-        let (mut renames, rejected) = rejected.partition(renames);
-        rejections.extend(rejected);
+        let (mut renames, mut rejections) = rejected.partition(renames);
 
         if !renames.is_empty() {
             if let Err(error) = sort_by_target(&mut renames) {

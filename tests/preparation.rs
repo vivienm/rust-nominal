@@ -117,6 +117,103 @@ fn overlaps_reject_all_affected_operations_but_keep_siblings() {
     assert_eq!(fs::read_to_string(p("b")).unwrap(), "a");
 }
 
+#[test]
+fn resolution_errors_do_not_hide_duplicates_or_overlaps() {
+    // Exercise both parent resolution and final-entry identification failures.
+    for bad in ["missing/../bad", "bad\0"] {
+        let cases = [
+            (("a", bad), ("a", "good")),
+            ((bad, "out"), ("a", "out")),
+            (("folder/child", bad), ("folder", "moved")),
+            (("folder", bad), ("folder/child", "good")),
+            ((bad, "out/child"), ("a", "out")),
+            ((bad, "out"), ("a", "out/child")),
+            (("folder", bad), ("a", "folder/new")),
+            ((bad, "folder"), ("folder/child", "good")),
+        ];
+        for (case, (invalid, conflicting)) in cases.into_iter().enumerate() {
+            for reverse in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let p = |name| dir.path().join(name);
+                fs::create_dir(p("folder")).unwrap();
+                for name in ["a", "folder/child", "independent"] {
+                    fs::write(p(name), name).unwrap();
+                }
+                let mut pairs = vec![
+                    (p(invalid.0), p(invalid.1)),
+                    (p(conflicting.0), p(conflicting.1)),
+                    (p("independent"), p("done")),
+                ];
+                if reverse {
+                    pairs.reverse();
+                }
+                let report = Renamer::from_iter(pairs.clone()).prepare();
+                let (plan, rejections) = report.into_parts();
+                assert_eq!(plan.len(), 1, "case {case}, reverse={reverse}");
+                let rejected: Vec<_> = rejections.iter().flat_map(|r| &r.renames).collect();
+                assert_eq!(rejected.len(), 2);
+                for pair in [
+                    (p(invalid.0), p(invalid.1)),
+                    (p(conflicting.0), p(conflicting.1)),
+                ] {
+                    assert_eq!(
+                        rejected
+                            .iter()
+                            .filter(|r| r.source == pair.0 && r.target == pair.1)
+                            .count(),
+                        1
+                    );
+                }
+                assert!(matches!(
+                    &rejections[0].reason,
+                    RejectionReason::Plan(PlanError::ResolvePath { .. })
+                ));
+                assert!(
+                    match &rejections[1].reason {
+                        RejectionReason::Plan(PlanError::DuplicateSource { .. }) => case == 0,
+                        RejectionReason::Plan(PlanError::DuplicateTarget { .. }) => case == 1,
+                        RejectionReason::Plan(PlanError::OverlappingPaths { .. }) => case >= 2,
+                        _ => false,
+                    },
+                    "case {case}, reverse={reverse}, bad={bad:?}"
+                );
+                assert!(Renamer::from_iter(pairs).prepare().into_plan().is_err());
+                plan.apply().unwrap();
+                for name in ["a", "folder/child"] {
+                    assert_eq!(fs::read_to_string(p(name)).unwrap(), name);
+                }
+                assert_eq!(fs::read_to_string(p("done")).unwrap(), "independent");
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn resolution_errors_keep_parent_aliases_and_dependent_renames_blocked() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("real")).unwrap();
+    std::os::unix::fs::symlink("real", p("alias")).unwrap();
+    for name in ["real/a", "b", "independent"] {
+        fs::write(p(name), name).unwrap();
+    }
+    let (plan, rejected) = Renamer::from_iter([
+        (p("alias/a"), p("missing/../bad")),
+        (p("real/a"), p("good")),
+        (p("b"), p("real/a")),
+        (p("independent"), p("done")),
+    ])
+    .prepare()
+    .into_parts();
+    assert_eq!(rejected.iter().map(|r| r.renames.len()).sum::<usize>(), 3);
+    assert_eq!(plan.len(), 1);
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("real/a")).unwrap(), "real/a");
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "b");
+    assert_eq!(fs::read_to_string(p("done")).unwrap(), "independent");
+}
+
 #[cfg(unix)]
 #[test]
 fn path_and_inspection_errors_include_operations_and_do_not_abort_the_batch() {
