@@ -25,11 +25,6 @@ impl<S, T> Preparation<S, T> {
         &self.rejections
     }
 
-    /// The number of rejected operations, rather than the number of groups.
-    pub fn rejected_count(&self) -> usize {
-        self.rejections.iter().map(|r| r.renames.len()).sum()
-    }
-
     /// Returns the plan only if every non-noop operation passed preparation.
     /// The error owns the paths of all rejected operations and their diagnostics,
     /// so it can be propagated even when the input paths were borrowed.
@@ -104,6 +99,10 @@ pub enum RejectionReason {
 }
 
 /// All rejections from a strict [`Preparation::into_plan`] conversion.
+///
+/// [`Display`](fmt::Display) produces a single-line summary. Applications can
+/// inspect [`rejections`](Self::rejections) to present individual diagnostics.
+/// Owned paths let this error outlive the preparation's borrowed inputs.
 #[derive(Debug)]
 pub struct PreparationError {
     /// Rejected operations grouped by diagnostic.
@@ -113,36 +112,32 @@ pub struct PreparationError {
 impl fmt::Display for PreparationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let count: usize = self.rejections.iter().map(|r| r.renames.len()).sum();
-        write!(f, "{count} rename operation(s) rejected during preparation")?;
-        for rejection in &self.rejections {
-            for rename in &rejection.renames {
-                write!(
-                    f,
-                    "\n{:?} -> {:?}: {}",
-                    rename.source, rename.target, rejection.reason
-                )?;
-            }
-        }
-        Ok(())
+        write!(
+            f,
+            "{count} rename operation{} rejected during preparation",
+            if count == 1 { "" } else { "s" },
+        )
     }
 }
 
 impl Error for PreparationError {}
 
+type Partition<S, T> = (Vec<Rename<S, T>>, Vec<Rejection<S, T>>);
+
 /// Assign each operation its first diagnostic while still detecting later
 /// conflicts against the entire batch. This prevents an arbitrary survivor
 /// when duplicate-source, duplicate-target and overlap groups intersect.
-type Partition<S, T> = (Vec<Rename<S, T>>, Vec<Rejection<S, T>>);
-
-pub(crate) struct Rejections {
+pub(crate) struct RejectionTracker {
     owners: Vec<Option<usize>>,
     reasons: Vec<RejectionReason>,
 }
 
-impl Rejections {
-    pub(crate) fn new(len: usize) -> Self {
+impl RejectionTracker {
+    /// Initializes one unassigned slot per operation. The count is the exact
+    /// batch length used by `mark` and `partition`, not an allocation hint.
+    pub(crate) fn new(operation_count: usize) -> Self {
         Self {
-            owners: vec![None; len],
+            owners: vec![None; operation_count],
             reasons: Vec::new(),
         }
     }

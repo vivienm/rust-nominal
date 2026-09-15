@@ -405,7 +405,10 @@ fn directory_suffix_differences_are_not_discarded_as_noops() {
         fs::write(dir.path().join("a"), "A").unwrap();
         let report =
             Renamer::from_iter([(dir.path().join(source), dir.path().join(target))]).prepare();
-        assert_eq!(report.rejected_count(), 1);
+        assert_eq!(
+            report.rejections().iter().flat_map(|r| &r.renames).count(),
+            1
+        );
         assert!(report.into_plan().is_err());
         assert_eq!(fs::read_to_string(dir.path().join("a")).unwrap(), "A");
     }

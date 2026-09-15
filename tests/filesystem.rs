@@ -40,7 +40,10 @@ fn direct_rename_resolves_existing_parents_and_creates_missing_destinations() {
 
 fn assert_conflict(source: &Path, target: &Path) {
     let report = Renamer::from_iter([(source, target)]).prepare();
-    assert_eq!(report.rejected_count(), 1);
+    assert_eq!(
+        report.rejections().iter().flat_map(|r| &r.renames).count(),
+        1
+    );
     assert!(matches!(&report.rejections()[0].reason,
         RejectionReason::Filesystem(FsError::TargetExists { target_path }) if target_path == target));
     assert!(report.into_plan().is_err());

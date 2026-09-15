@@ -44,8 +44,13 @@ Preparation does not modify the filesystem. It removes no-ops, resolves parent
 aliases, rejects duplicate contenders, overlaps and cycles, orders dependencies,
 and checks occupied targets. Rejections include the affected operations and any
 filesystem inspection error. Each rejected operation is counted once, even if it
-has several problems. `Preparation::rejected_count()` counts operations;
-`rejections().len()` counts diagnostic groups.
+has several problems. `rejections().len()` counts diagnostic groups; sum their
+`renames.len()` values when you need the number of rejected operations.
+
+`PreparationError` implements `std::error::Error` and owns the rejected paths,
+so it can be propagated with `?` even when the input paths were borrowed. Its
+`Display` is a single-line summary; applications can iterate over its
+`rejections` to log each affected operation with its diagnostic.
 
 `Plan::reject_conflicts()` explicitly removes new conflicts if another check is
 needed after preparation. `apply()` stops at the first error; `apply_iter()` lets

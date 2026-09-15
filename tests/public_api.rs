@@ -39,6 +39,12 @@ fn preparation_supports_try_from_and_try_into_without_executing() {
         from_error.to_string(),
         prepare().into_plan().unwrap_err().to_string()
     );
+    assert_eq!(
+        from_error.to_string(),
+        "1 rename operation rejected during preparation"
+    );
     assert_eq!(from_error.rejections[0].renames[0].source, source);
+    // Strict errors own their paths and support ordinary boxed error propagation.
+    let _: Box<dyn std::error::Error + Send + Sync> = from_error.into();
     assert_eq!(std::fs::read_to_string(target).unwrap(), "occupied");
 }

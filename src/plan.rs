@@ -10,7 +10,7 @@ use crate::{
     error::{ApplyError, FsError},
     fsutil::{EntryKey, target_conflicts},
     operation::Rename,
-    preparation::{Rejection, Rejections},
+    preparation::{Rejection, RejectionTracker},
 };
 
 /// A renaming plan.
@@ -144,7 +144,7 @@ where
     /// cross-filesystem moves can still fail at execution time.
     pub fn reject_conflicts(&mut self) -> Vec<Rejection<S, T>> {
         let mut vacated: HashSet<&EntryKey> = HashSet::with_capacity(self.renames.len());
-        let mut rejected = Rejections::new(self.renames.len());
+        let mut rejected = RejectionTracker::new(self.renames.len());
         for (index, rename) in self.renames.iter().enumerate() {
             let source = self.paths[rename.source.as_ref().as_os_str()].as_path();
             let target = self.paths[rename.target.as_ref().as_os_str()].as_path();

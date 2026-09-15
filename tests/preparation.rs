@@ -23,17 +23,28 @@ fn duplicate_groups_and_cycles_preserve_independent_chains() {
         (p("g"), p("a")), // a is no longer vacated: this must be rejected too.
     ];
     let report = Renamer::from_iter(pairs.clone()).prepare();
-    assert_eq!(report.rejected_count(), 5);
+    assert_eq!(
+        report.rejections().iter().flat_map(|r| &r.renames).count(),
+        5
+    );
     assert_eq!(report.rejections().len(), 3);
     assert!(matches!(
         &report.rejections()[0].reason,
         RejectionReason::Plan(PlanError::DuplicateTarget { .. })
     ));
     let error = report.into_plan().unwrap_err();
-    let message = error.to_string();
-    for name in ["a", "b", "c", "d", "g"] {
-        assert!(message.contains(p(name).to_str().unwrap()), "{message}");
-    }
+    assert_eq!(
+        error.to_string(),
+        "5 rename operations rejected during preparation"
+    );
+    let mut sources: Vec<_> = error
+        .rejections
+        .iter()
+        .flat_map(|r| &r.renames)
+        .map(|r| r.source.clone())
+        .collect();
+    sources.sort();
+    assert_eq!(sources, [p("a"), p("b"), p("c"), p("d"), p("g")]);
     // Strict conversion performs no part of the batch.
     for name in ["a", "b", "c", "d", "e", "f", "g"] {
         assert_eq!(fs::read_to_string(p(name)).unwrap(), name);
@@ -65,7 +76,10 @@ fn intersecting_duplicate_groups_have_no_arbitrary_survivor_or_double_count() {
             pairs.reverse();
         }
         let report = Renamer::from_iter(pairs).prepare();
-        assert_eq!(report.rejected_count(), 3);
+        assert_eq!(
+            report.rejections().iter().flat_map(|r| &r.renames).count(),
+            3
+        );
         let (plan, _) = report.into_parts();
         assert_eq!(plan.len(), 1);
         plan.apply().unwrap();
@@ -90,7 +104,10 @@ fn overlaps_reject_all_affected_operations_but_keep_siblings() {
         (p("a"), p("b")),
     ])
     .prepare();
-    assert_eq!(report.rejected_count(), 2);
+    assert_eq!(
+        report.rejections().iter().flat_map(|r| &r.renames).count(),
+        2
+    );
     assert!(matches!(
         &report.rejections()[0].reason,
         RejectionReason::Plan(PlanError::OverlappingPaths { .. })
@@ -114,7 +131,10 @@ fn path_and_inspection_errors_include_operations_and_do_not_abort_the_batch() {
         (p("c"), p("good")),
     ])
     .prepare();
-    assert_eq!(report.rejected_count(), 2);
+    assert_eq!(
+        report.rejections().iter().flat_map(|r| &r.renames).count(),
+        2
+    );
     assert!(matches!(&report.rejections()[0].reason,
         RejectionReason::Plan(PlanError::ResolvePath { path, .. }) if path == &p("missing/../target")));
     assert!(matches!(&report.rejections()[1].reason,

@@ -9,7 +9,7 @@ use crate::{
     fsutil::{EntryKey, entry_key, entry_path},
     operation::Rename,
     plan::Plan,
-    preparation::{Preparation, Rejection, Rejections},
+    preparation::{Preparation, Rejection, RejectionTracker},
 };
 
 /// Prepares a batch file renaming operation.
@@ -154,7 +154,7 @@ where
             }
         }
 
-        let mut rejected = Rejections::new(renames.len());
+        let mut rejected = RejectionTracker::new(renames.len());
         let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
         let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
         let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
@@ -235,7 +235,7 @@ where
             } else if let Err(cycles) = topological_sort(&mut renames, &keys) {
                 // All cycles are known after one pass. Remove every cycle in
                 // one partition, then order the remaining acyclic operations.
-                let mut rejected = Rejections::new(renames.len());
+                let mut rejected = RejectionTracker::new(renames.len());
                 let indices: HashMap<_, _> = renames
                     .iter()
                     .enumerate()
@@ -438,7 +438,10 @@ mod tests {
             ([("a", "z"), ("b", "z")], false),
         ] {
             let report = Renamer::from_iter(pairs).prepare();
-            assert_eq!(report.rejected_count(), 2);
+            assert_eq!(
+                report.rejections().iter().flat_map(|r| &r.renames).count(),
+                2
+            );
             assert!(
                 matches!(&report.rejections()[0].reason,
                 RejectionReason::Plan(PlanError::DuplicateSource { .. }) if source)
@@ -471,7 +474,10 @@ mod tests {
     #[test]
     fn disjoint_cycles_are_grouped_separately() {
         let report = Renamer::from_iter([("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]).prepare();
-        assert_eq!(report.rejected_count(), 4);
+        assert_eq!(
+            report.rejections().iter().flat_map(|r| &r.renames).count(),
+            4
+        );
         assert_eq!(report.rejections().len(), 2);
         for rejection in report.rejections() {
             assert_eq!(rejection.renames.len(), 2);
