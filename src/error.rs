@@ -7,16 +7,17 @@ use thiserror::Error;
 #[error(transparent)]
 #[non_exhaustive]
 pub enum Error {
+    /// Rejections from strict preparation.
+    Preparation(#[from] crate::PreparationError),
     /// A plan error.
     Plan(#[from] PlanError),
-    /// A filesystem-check conflict.
-    CheckFs(#[from] FsConflict),
+    /// A filesystem inspection error.
+    Filesystem(#[from] FsError),
     /// An apply error.
     Apply(#[from] ApplyError),
 }
 
-/// The error type returned from
-/// [`Renamer::plan`](crate::renamer::Renamer::plan).
+/// A planning diagnostic from [`Renamer::prepare`](crate::Renamer::prepare).
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PlanError {
@@ -64,16 +65,27 @@ pub enum PlanError {
     },
 }
 
-/// A filesystem conflict reported by
-/// [`Plan::check_fs`](crate::plan::Plan::check_fs).
+/// A filesystem error reported during preparation or
+/// [`Plan::reject_conflicts`](crate::Plan::reject_conflicts).
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum FsConflict {
+pub enum FsError {
     /// The target path is occupied by another directory entry on disk.
     #[error("target {target_path:?} already exists")]
     TargetExists {
         /// The target path of the conflicting rename.
         target_path: PathBuf,
+    },
+    /// The source or target could not be inspected. The affected operation is
+    /// reported without guessing which path caused a multi-path check to fail.
+    #[error("failed to inspect {source_path:?} -> {target_path:?}: {source}")]
+    Inspect {
+        /// The original source path.
+        source_path: PathBuf,
+        /// The original target path.
+        target_path: PathBuf,
+        /// The underlying filesystem error.
+        source: io::Error,
     },
 }
 

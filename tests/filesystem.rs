@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use nominal::{FsConflict, Rename, RenameError, Renamer};
+use nominal::{FsError, RejectionReason, Rename, RenameError, Renamer};
 
 #[test]
 fn direct_rename_rejects_missing_parent_before_dotdot_without_overwriting() {
@@ -39,19 +39,15 @@ fn direct_rename_resolves_existing_parents_and_creates_missing_destinations() {
 }
 
 fn assert_conflict(source: &Path, target: &Path) {
-    let mut plan = Renamer::from_iter([(source, target)]).plan().unwrap();
-    let conflicts = plan.check_fs().unwrap();
+    let report = Renamer::from_iter([(source, target)]).prepare();
+    assert_eq!(report.rejected_count(), 1);
+    assert!(matches!(&report.rejections()[0].reason,
+        RejectionReason::Filesystem(FsError::TargetExists { target_path }) if target_path == target));
+    assert!(report.into_plan().is_err());
     assert!(matches!(
-        conflicts.as_slice(),
-        [FsConflict::TargetExists { target_path }] if target_path == target
+        Rename::new(source, target).apply(),
+        Err(RenameError::TargetExists)
     ));
-    assert!(plan.is_empty());
-    let error = Renamer::from_iter([(source, target)])
-        .plan()
-        .unwrap()
-        .apply()
-        .unwrap_err();
-    assert!(matches!(error.source, RenameError::TargetExists));
 }
 
 #[test]
@@ -84,8 +80,11 @@ fn case_only_rename_preserves_stored_spelling() {
     fs::write(&source, "contents").unwrap();
     // Exercises the existing-target exception on case-insensitive filesystems,
     // and the ordinary absent-target path on case-sensitive ones.
-    let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    let mut plan = Renamer::from_iter([(&source, &target)])
+        .prepare()
+        .into_plan()
+        .unwrap();
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     let names: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
@@ -147,8 +146,11 @@ mod unix {
         let source = dir.path().join("source");
         let target = dir.path().join("target");
         symlink("missing", &source).unwrap();
-        let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-        assert!(plan.check_fs().unwrap().is_empty());
+        let mut plan = Renamer::from_iter([(&source, &target)])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        assert!(plan.reject_conflicts().is_empty());
         plan.apply().unwrap();
         assert!(fs::symlink_metadata(&source).is_err());
         assert_eq!(fs::read_link(&target).unwrap(), Path::new("missing"));
@@ -161,8 +163,11 @@ mod unix {
         let target = dir.path().join("target");
         fs::write(&source, "contents").unwrap();
         fs::set_permissions(&source, fs::Permissions::from_mode(0o000)).unwrap();
-        let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-        assert!(plan.check_fs().unwrap().is_empty());
+        let mut plan = Renamer::from_iter([(&source, &target)])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        assert!(plan.reject_conflicts().is_empty());
         plan.apply().unwrap();
         assert!(!source.exists());
         assert_eq!(
@@ -177,8 +182,11 @@ mod unix {
         let source = dir.path().join("source");
         let target = dir.path().join("target");
         let _listener = UnixListener::bind(&source).unwrap();
-        let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-        assert!(plan.check_fs().unwrap().is_empty());
+        let mut plan = Renamer::from_iter([(&source, &target)])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        assert!(plan.reject_conflicts().is_empty());
         plan.apply().unwrap();
         assert!(!source.exists());
         assert!(target.exists());
@@ -192,25 +200,26 @@ fn conflicts_propagate_through_chains_without_removing_independent_moves() {
     for name in ["a", "b", "c", "d", "independent"] {
         fs::write(p(name), name).unwrap();
     }
-    let mut plan = Renamer::from_iter([
+    let (mut plan, conflicts) = Renamer::from_iter([
         (p("a"), p("b")),
         (p("b"), p("c")),
         (p("c"), p("d")),
         (p("independent"), p("free")),
     ])
-    .plan()
-    .unwrap();
-    let conflicts = plan.check_fs().unwrap();
+    .prepare()
+    .into_parts();
     let targets: Vec<_> = conflicts
         .iter()
-        .map(|conflict| match conflict {
-            FsConflict::TargetExists { target_path } => target_path.clone(),
+        .map(|conflict| match &conflict.reason {
+            RejectionReason::Filesystem(FsError::TargetExists { target_path }) => {
+                target_path.clone()
+            }
             _ => panic!("unexpected conflict: {conflict:?}"),
         })
         .collect();
     assert_eq!(targets, [p("d"), p("c"), p("b")]);
     assert_eq!(plan.len(), 1);
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     for name in ["a", "b", "c", "d"] {
         assert_eq!(fs::read_to_string(p(name)).unwrap(), name);
@@ -225,10 +234,10 @@ fn hard_link_conflict_propagates_to_dependent_moves() {
     fs::write(p("a"), "A").unwrap();
     fs::write(p("b"), "B").unwrap();
     fs::hard_link(p("b"), p("c")).unwrap();
-    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
-        .plan()
-        .unwrap();
-    assert_eq!(plan.check_fs().unwrap().len(), 2);
+    let (plan, conflicts) = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
+        .prepare()
+        .into_parts();
+    assert_eq!(conflicts.len(), 2);
     assert!(plan.is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
@@ -243,9 +252,10 @@ fn unblocked_chain_moves_original_contents_to_their_targets() {
     fs::write(p("a"), "A").unwrap();
     fs::write(p("b"), "B").unwrap();
     let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     assert_eq!(plan.len(), 2);
     plan.apply().unwrap();
     assert!(!p("a").exists());
@@ -260,9 +270,10 @@ fn separate_hard_links_can_be_moved_independently() {
     fs::write(p("a"), "data").unwrap();
     fs::hard_link(p("a"), p("b")).unwrap();
     let mut plan = Renamer::from_iter([(p("a"), p("c")), (p("b"), p("d"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert!(!p("a").exists());
     assert!(!p("b").exists());

@@ -20,7 +20,7 @@
 //! let mut renamer = Renamer::new();
 //! renamer.add(&old_path, &new_path);
 //!
-//! let plan = renamer.plan()?;
+//! let plan = renamer.prepare().into_plan()?;
 //! plan.apply()?;
 //!
 //! assert!(!old_path.exists());
@@ -33,11 +33,13 @@ mod fsutil;
 mod noreplace;
 mod operation;
 mod plan;
+mod preparation;
 mod renamer;
 
 pub use self::{
-    error::{ApplyError, Error, FsConflict, PlanError, RenameError},
+    error::{ApplyError, Error, FsError, PlanError, RenameError},
     operation::Rename,
     plan::{ApplyIter, Plan},
+    preparation::{Preparation, PreparationError, Rejection, RejectionReason},
     renamer::Renamer,
 };

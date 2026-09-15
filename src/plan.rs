@@ -7,9 +7,10 @@ use std::{
 };
 
 use crate::{
-    error::{ApplyError, FsConflict},
+    error::{ApplyError, FsError},
     fsutil::{EntryKey, target_conflicts},
     operation::Rename,
+    preparation::{Rejection, Rejections},
 };
 
 /// A renaming plan.
@@ -28,7 +29,7 @@ impl<S, T> Plan<S, T> {
     ///
     /// ```
     /// # use nominal::{Plan, Renamer};
-    /// let plan: Plan<&str, &str> = Renamer::new().plan()?;
+    /// let plan: Plan<&str, &str> = Renamer::new().prepare().into_plan()?;
     /// assert!(plan.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -45,7 +46,7 @@ impl<S, T> Plan<S, T> {
     /// let mut renamer = Renamer::new();
     /// renamer.add("old.txt", "new.txt");
     ///
-    /// let plan = renamer.plan()?;
+    /// let plan = renamer.prepare().into_plan()?;
     /// assert_eq!(plan.len(), 1);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -106,7 +107,7 @@ where
     ///
     /// ```
     /// # use nominal::{Plan, Renamer};
-    /// let plan: Plan<&str, &str> = Renamer::new().plan()?;
+    /// let plan: Plan<&str, &str> = Renamer::new().prepare().into_plan()?;
     /// assert!(plan.confirm()?.is_none());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
@@ -123,93 +124,58 @@ where
         })
     }
 
-    /// Inspects the filesystem and returns the renames whose target path
-    /// is occupied by another directory entry on disk.
+    /// Rechecks destinations and removes operations with filesystem conflicts.
     ///
-    /// Conflicting renames are removed from the plan, so a subsequent
-    /// [`apply`](Self::apply) only attempts the entries that are still safe
-    /// to perform. Existing symlinks and separate hard links are conflicts,
-    /// including dangling symlinks and links to the source. Case-only renames
-    /// of singly linked files on case-insensitive filesystems are allowed.
-    /// On Unix, existing targets for multiply linked files are conservatively
-    /// rejected even for case-only changes. On non-Unix platforms, existing
-    /// symlink targets are always rejected.
-    /// Conflicts propagate through chains: if `b -> c` is rejected because
-    /// `c` exists, `a -> b` is also rejected while `b` remains occupied.
+    /// Preparation already performs this check. Call it again if the filesystem
+    /// may have changed before execution. Each rejection includes the original
+    /// operation and either an occupied-target diagnostic or an inspection I/O
+    /// error. An inspection failure rejects that operation without discarding
+    /// independent operations. Conflicts propagate through chains: a rejected
+    /// `b -> c` cannot unblock `a -> b` while `b` is still occupied.
     ///
-    /// Targets shared by multiple renames in the same batch are already
-    /// rejected at [`plan`](crate::Renamer::plan) time as
-    /// [`PlanError::DuplicateTarget`](crate::PlanError::DuplicateTarget); this
-    /// method only looks for collisions with files outside the batch.
+    /// Existing symlinks (including dangling ones) and separate hard links are
+    /// conflicts. Case-only changes of singly linked files are allowed on
+    /// case-insensitive filesystems. On Unix, multiply linked files are rejected
+    /// conservatively for existing targets, even for case-only changes. On other
+    /// platforms, existing symlink targets are always rejected.
     ///
-    /// The check is not atomic with the rename itself: a target that is
-    /// absent here may appear before [`apply`](Self::apply) runs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an [`io::Error`] if a path's existence cannot be determined.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # use std::fs::File;
-    /// # use nominal::Renamer;
-    /// let temp_dir = tempfile::tempdir()?;
-    /// let dir = temp_dir.path();
-    /// File::create(dir.join("a"))?;
-    /// File::create(dir.join("c"))?;
-    /// File::create(dir.join("b"))?; // pre-existing target
-    ///
-    /// let mut renamer = Renamer::new();
-    /// renamer.add(dir.join("a"), dir.join("b"));
-    /// renamer.add(dir.join("c"), dir.join("d"));
-    ///
-    /// let mut plan = renamer.plan()?;
-    /// let conflicts = plan.check_fs()?;
-    /// assert_eq!(conflicts.len(), 1);
-    /// assert_eq!(plan.len(), 1);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn check_fs(&mut self) -> io::Result<Vec<FsConflict>> {
+    /// This preflight check does not reserve destinations. Execution also
+    /// refuses replacement atomically. Source existence, permissions and
+    /// cross-filesystem moves can still fail at execution time.
+    pub fn reject_conflicts(&mut self) -> Vec<Rejection<S, T>> {
         let mut vacated: HashSet<&EntryKey> = HashSet::with_capacity(self.renames.len());
-
-        // Mark conflicts in a first pass so the immutable borrow on
-        // `self.renames` is released before we start moving entries.
-        let mut is_conflict = Vec::with_capacity(self.renames.len());
-        for rename in &self.renames {
+        let mut rejected = Rejections::new(self.renames.len());
+        for (index, rename) in self.renames.iter().enumerate() {
             let source = self.paths[rename.source.as_ref().as_os_str()].as_path();
             let target = self.paths[rename.target.as_ref().as_os_str()].as_path();
-            // The plan is in execution order. Only retained earlier operations
-            // will vacate their sources; a rejected operation cannot unblock
-            // the rest of its chain.
             let conflict = if vacated.contains(&self.keys[rename.target.as_ref().as_os_str()]) {
-                false
+                Ok(false)
             } else {
-                target_conflicts(source, target)?
+                target_conflicts(source, target)
             };
-            is_conflict.push(conflict);
-            if !conflict {
-                vacated.insert(&self.keys[rename.source.as_ref().as_os_str()]);
+            match conflict {
+                Ok(false) => {
+                    vacated.insert(&self.keys[rename.source.as_ref().as_os_str()]);
+                }
+                Ok(true) => rejected.mark(
+                    [index],
+                    FsError::TargetExists {
+                        target_path: rename.target.as_ref().to_path_buf(),
+                    },
+                ),
+                Err(source) => rejected.mark(
+                    [index],
+                    FsError::Inspect {
+                        source_path: rename.source.as_ref().to_path_buf(),
+                        target_path: rename.target.as_ref().to_path_buf(),
+                        source,
+                    },
+                ),
             }
         }
-        drop(vacated);
-
-        let mut conflicts = Vec::new();
-        self.renames = std::mem::take(&mut self.renames)
-            .into_iter()
-            .zip(is_conflict)
-            .filter_map(|(rename, conflict)| {
-                if conflict {
-                    conflicts.push(FsConflict::TargetExists {
-                        target_path: rename.target.as_ref().to_path_buf(),
-                    });
-                    None
-                } else {
-                    Some(rename)
-                }
-            })
-            .collect();
-        Ok(conflicts)
+        let (retained, rejections) = rejected.partition(std::mem::take(&mut self.renames));
+        self.renames = retained;
+        rejections
     }
 
     /// Executes the plan, stopping at the first failure.
@@ -247,7 +213,7 @@ where
     /// let mut renamer = Renamer::new();
     /// renamer.add(&old_path, &new_path);
     ///
-    /// let plan = renamer.plan()?;
+    /// let plan = renamer.prepare().into_plan()?;
     /// plan.apply()?;
     ///
     /// assert!(!old_path.exists());
@@ -280,7 +246,6 @@ where
     /// let dir = temp_dir.path();
     /// File::create(dir.join("a"))?;
     /// File::create(dir.join("c"))?;
-    /// File::create(dir.join("d"))?; // pre-existing target, will collide
     ///
     /// let mut renamer = Renamer::new();
     /// renamer.add(dir.join("a"), dir.join("b"));
@@ -288,7 +253,9 @@ where
     ///
     /// let mut renamed = 0;
     /// let mut errors = Vec::new();
-    /// for result in renamer.plan()?.apply_iter() {
+    /// let plan = renamer.prepare().into_plan()?;
+    /// File::create(dir.join("d"))?; // target appeared after preparation
+    /// for result in plan.apply_iter() {
     ///     match result {
     ///         Ok(_) => renamed += 1,
     ///         Err(err) => errors.push(err),
@@ -366,23 +333,20 @@ mod tests {
         // First rename succeeds, second collides with a pre-existing target.
         File::create(dir.join("a")).unwrap();
         File::create(dir.join("c")).unwrap();
-        File::create(dir.join("d")).unwrap();
 
         let mut renamer = Renamer::new();
         renamer.add(dir.join("a"), dir.join("b"));
         renamer.add(dir.join("c"), dir.join("d"));
 
-        let err = renamer
-            .plan()
-            .unwrap()
-            .apply()
-            .expect_err("second rename should fail");
+        let plan = renamer.prepare().into_plan().unwrap();
+        File::create(dir.join("d")).unwrap();
+        let err = plan.apply().expect_err("second rename should fail");
         assert_eq!(err.source_path, dir.join("c"));
         assert_eq!(err.target_path, dir.join("d"));
     }
 
     #[test]
-    fn check_fs_reports_pre_existing_target() {
+    fn preparation_reports_pre_existing_target() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dir = temp_dir.path();
 
@@ -394,22 +358,18 @@ mod tests {
         renamer.add(dir.join("a"), dir.join("b"));
         renamer.add(dir.join("c"), dir.join("d"));
 
-        let mut plan = renamer.plan().unwrap();
-        let conflicts = plan.check_fs().unwrap();
+        let (plan, conflicts) = renamer.prepare().into_parts();
 
         assert_eq!(conflicts.len(), 1);
-        match &conflicts[0] {
-            crate::FsConflict::TargetExists { target_path } => {
-                assert_eq!(target_path, &dir.join("b"));
-            }
-        }
+        assert!(matches!(&conflicts[0].reason,
+            crate::RejectionReason::Filesystem(crate::FsError::TargetExists { target_path }) if target_path == &dir.join("b")));
         assert_eq!(plan.len(), 1);
     }
 
     #[test]
-    fn check_fs_does_not_report_targets_freed_by_the_batch() {
+    fn preparation_does_not_report_targets_freed_by_the_batch() {
         // a -> b -> c: b's target c is created later, but b itself will be
-        // moved out of the way (its source is also a target). check_fs must
+        // moved out of the way (its source is also a target). preparation must
         // not flag this as a conflict.
         let temp_dir = tempfile::tempdir().unwrap();
         let dir = temp_dir.path();
@@ -421,8 +381,7 @@ mod tests {
         renamer.add(dir.join("a"), dir.join("b"));
         renamer.add(dir.join("b"), dir.join("c"));
 
-        let mut plan = renamer.plan().unwrap();
-        let conflicts = plan.check_fs().unwrap();
+        let (plan, conflicts) = renamer.prepare().into_parts();
 
         assert!(conflicts.is_empty());
         assert_eq!(plan.len(), 2);
@@ -430,7 +389,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn check_fs_reports_target_symlink_to_source() {
+    fn preparation_reports_target_symlink_to_source() {
         use std::os::unix::fs::symlink;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -443,8 +402,7 @@ mod tests {
         let mut renamer = Renamer::new();
         renamer.add(dir.join("a"), dir.join("b"));
 
-        let mut plan = renamer.plan().unwrap();
-        let conflicts = plan.check_fs().unwrap();
+        let (plan, conflicts) = renamer.prepare().into_parts();
 
         assert_eq!(conflicts.len(), 1);
         assert!(plan.is_empty());
@@ -459,7 +417,6 @@ mod tests {
         // through. Best-effort iteration should yield Ok / Err / Ok in order.
         File::create(dir.join("a")).unwrap();
         File::create(dir.join("c")).unwrap();
-        File::create(dir.join("d")).unwrap();
         File::create(dir.join("e")).unwrap();
 
         let mut renamer = Renamer::new();
@@ -467,7 +424,9 @@ mod tests {
         renamer.add(dir.join("c"), dir.join("d"));
         renamer.add(dir.join("e"), dir.join("f"));
 
-        let outcomes: Vec<_> = renamer.plan().unwrap().apply_iter().collect();
+        let plan = renamer.prepare().into_plan().unwrap();
+        File::create(dir.join("d")).unwrap();
+        let outcomes: Vec<_> = plan.apply_iter().collect();
         assert_eq!(outcomes.len(), 3);
         assert!(outcomes[0].is_ok());
         let err = outcomes[1].as_ref().unwrap_err();

@@ -4,6 +4,13 @@ use std::fs;
 
 use nominal::{PlanError, Renamer};
 
+fn plan_error(error: nominal::PreparationError) -> PlanError {
+    match error.rejections.into_iter().next().unwrap().reason {
+        nominal::RejectionReason::Plan(error) => error,
+        other => panic!("expected a planning diagnostic, got {other:?}"),
+    }
+}
+
 #[test]
 fn parent_destinations_are_supported_but_existing_files_are_protected() {
     let dir = tempfile::tempdir().unwrap();
@@ -14,8 +21,11 @@ fn parent_destinations_are_supported_but_existing_files_are_protected() {
     fs::write(&source, "new book").unwrap();
 
     // Nominal is a general-purpose renamer; confinement is the caller's policy.
-    let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    let mut plan = Renamer::from_iter([(&source, &target)])
+        .prepare()
+        .into_plan()
+        .unwrap();
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(
         fs::read_to_string(dir.path().join("book.epub")).unwrap(),
@@ -24,14 +34,15 @@ fn parent_destinations_are_supported_but_existing_files_are_protected() {
     assert!(!source.exists());
 
     fs::write(&source, "another book").unwrap();
-    let mut plan = Renamer::from_iter([(&source, &target)]).plan().unwrap();
-    assert_eq!(plan.check_fs().unwrap().len(), 1);
+    let (plan, conflicts) = Renamer::from_iter([(&source, &target)])
+        .prepare()
+        .into_parts();
+    assert_eq!(conflicts.len(), 1);
     assert!(plan.is_empty());
     assert!(
         Renamer::from_iter([(&source, &target)])
-            .plan()
-            .unwrap()
-            .apply()
+            .prepare()
+            .into_plan()
             .is_err()
     );
     assert_eq!(fs::read_to_string(&source).unwrap(), "another book");
@@ -39,7 +50,7 @@ fn parent_destinations_are_supported_but_existing_files_are_protected() {
 }
 
 #[test]
-fn parent_aliases_form_a_valid_chain_with_or_without_check_fs() {
+fn parent_aliases_form_a_valid_chain_with_or_without_recheck() {
     for check in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let p = |name| dir.path().join(name);
@@ -47,10 +58,11 @@ fn parent_aliases_form_a_valid_chain_with_or_without_check_fs() {
         fs::write(p("a"), "A").unwrap();
         fs::write(p("b"), "B").unwrap();
         let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("sub/../b"), p("c"))])
-            .plan()
+            .prepare()
+            .into_plan()
             .unwrap();
         if check {
-            assert!(plan.check_fs().unwrap().is_empty());
+            assert!(plan.reject_conflicts().is_empty());
         }
         let results: Vec<_> = plan.apply_iter().map(Result::unwrap).collect();
         assert_eq!(results[0].source, p("sub/../b"));
@@ -66,11 +78,15 @@ fn duplicate_sources_and_targets_are_detected_through_aliases() {
     let p = |name| dir.path().join(name);
     fs::create_dir(p("sub")).unwrap();
     let source_error = Renamer::from_iter([(p("a"), p("b")), (p("sub/../a"), p("c"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(source_error, PlanError::DuplicateSource { .. }));
     let target_error = Renamer::from_iter([(p("a"), p("b")), (p("c"), p("sub/../b"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(target_error, PlanError::DuplicateTarget { .. }));
 }
@@ -81,7 +97,9 @@ fn cycles_are_detected_through_aliases() {
     let p = |name| dir.path().join(name);
     fs::create_dir(p("sub")).unwrap();
     let error = Renamer::from_iter([(p("a"), p("b")), (p("sub/../b"), p("a"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::Cycle { .. }));
 }
@@ -93,11 +111,10 @@ fn alias_noop_does_not_pretend_to_vacate_a_target() {
     fs::create_dir(p("sub")).unwrap();
     fs::write(p("a"), "A").unwrap();
     fs::write(p("b"), "B").unwrap();
-    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("sub/../b"))])
-        .plan()
-        .unwrap();
-    assert_eq!(plan.len(), 1);
-    assert_eq!(plan.check_fs().unwrap().len(), 1);
+    let (plan, conflicts) = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("sub/../b"))])
+        .prepare()
+        .into_parts();
+    assert_eq!(conflicts.len(), 1);
     assert!(plan.is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
@@ -110,10 +127,11 @@ fn absent_target_directories_are_created_after_planning() {
     let p = |name| dir.path().join(name);
     fs::write(p("a"), "A").unwrap();
     let mut plan = Renamer::from_iter([(p("a"), p("new/deep/b"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
     assert!(!p("new").exists());
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("new/deep/b")).unwrap(), "A");
 }
@@ -124,7 +142,9 @@ fn missing_parent_followed_by_dotdot_is_not_simplified() {
     let p = |name| dir.path().join(name);
     fs::write(p("a"), "A").unwrap();
     let error = Renamer::from_iter([(p("missing/../a"), p("b"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::ResolvePath { .. }));
     assert!(p("a").exists());
@@ -141,9 +161,10 @@ fn dotdot_after_a_symlink_uses_the_real_parent() {
     fs::write(p("a"), "A").unwrap();
     fs::write(p("real/b"), "B").unwrap();
     let mut plan = Renamer::from_iter([(p("a"), p("real/b")), (p("alias/../b"), p("c"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("real/b")).unwrap(), "A");
     assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
@@ -158,7 +179,9 @@ fn dangling_parent_symlink_is_not_treated_as_a_future_directory() {
     let p = |name| dir.path().join(name);
     symlink("missing", p("parent")).unwrap();
     let error = Renamer::from_iter([(p("a"), p("parent/b"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::ResolvePath { .. }));
     assert_eq!(
@@ -177,7 +200,8 @@ fn normalization_preserves_trailing_directory_requirements() {
         fs::write(&source, "A").unwrap();
         let with_suffix = dir.path().join(format!("a{suffix}"));
         let plan = Renamer::from_iter([(with_suffix, target.clone())])
-            .plan()
+            .prepare()
+            .into_plan()
             .unwrap();
         assert!(plan.apply().is_err());
         assert_eq!(fs::read_to_string(&source).unwrap(), "A");
@@ -196,7 +220,11 @@ fn nested_destinations_are_rejected_before_any_files_are_moved() {
         if reverse {
             renames.reverse();
         }
-        let error = Renamer::from_iter(renames).plan().unwrap_err();
+        let error = Renamer::from_iter(renames)
+            .prepare()
+            .into_plan()
+            .map_err(plan_error)
+            .unwrap_err();
         assert!(
             matches!(error, PlanError::OverlappingPaths { ancestor_path, descendant_path }
             if ancestor_path == p("out") && descendant_path == p("out/child"))
@@ -213,7 +241,9 @@ fn nested_destinations_are_detected_through_parent_aliases() {
     let p = |name| dir.path().join(name);
     fs::create_dir(p("sub")).unwrap();
     let error = Renamer::from_iter([(p("a"), p("out")), (p("b"), p("sub/../out/child"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::OverlappingPaths { .. }));
 }
@@ -225,12 +255,16 @@ fn directory_and_descendant_moves_require_separate_batches() {
     fs::create_dir(p("folder")).unwrap();
     fs::write(p("folder/file"), "data").unwrap();
     let error = Renamer::from_iter([(p("folder"), p("moved")), (p("folder/file"), p("file"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::OverlappingPaths { .. }));
     assert_eq!(fs::read_to_string(p("folder/file")).unwrap(), "data");
     let error = Renamer::from_iter([(p("folder"), p("folder/child"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::OverlappingPaths { .. }));
 }
@@ -248,9 +282,10 @@ fn sibling_destinations_and_independent_directory_moves_remain_supported() {
         (p("a"), p("out/first")),
         (p("b"), p("out/second")),
     ])
-    .plan()
+    .prepare()
+    .into_plan()
     .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("moved/file")).unwrap(), "data");
     assert_eq!(fs::read_to_string(p("out/first")).unwrap(), "A");
@@ -280,10 +315,11 @@ fn relative_paths_are_anchored_at_planning_time() {
         (std::path::PathBuf::from("a"), base.join("b")),
         (std::path::PathBuf::from("./b"), base.join("c")),
     ])
-    .plan()
+    .prepare()
+    .into_plan()
     .unwrap();
     std::env::set_current_dir("other").unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     let results: Vec<_> = plan.apply_iter().map(Result::unwrap).collect();
     assert_eq!(results[0].source, std::path::Path::new("./b"));
     assert_eq!(fs::read_to_string(base.join("b")).unwrap(), "A");
@@ -303,7 +339,8 @@ fn trailing_dot_components_do_not_turn_into_directory_moves() {
         fs::write(source.join("file"), "data").unwrap();
         let with_suffix = dir.path().join(format!("folder{suffix}"));
         let plan = Renamer::from_iter([(with_suffix, target.clone())])
-            .plan()
+            .prepare()
+            .into_plan()
             .unwrap();
         assert!(plan.apply().is_err());
         assert_eq!(fs::read_to_string(source.join("file")).unwrap(), "data");
@@ -324,7 +361,7 @@ fn batch_cache_preserves_each_sources_directory_suffix() {
             if reverse {
                 renames.reverse();
             }
-            let plan = Renamer::from_iter(renames).plan().unwrap();
+            let plan = Renamer::from_iter(renames).prepare().into_plan().unwrap();
             assert!(plan.apply().is_err());
             assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
             assert_eq!(fs::read_to_string(p("b")).unwrap(), "B");
@@ -347,7 +384,8 @@ fn batch_cache_preserves_each_targets_directory_suffix() {
                 renames.reverse();
             }
             let outcomes: Vec<_> = Renamer::from_iter(renames)
-                .plan()
+                .prepare()
+                .into_plan()
                 .unwrap()
                 .apply_iter()
                 .collect();
@@ -365,11 +403,10 @@ fn directory_suffix_differences_are_not_discarded_as_noops() {
     for (source, target) in [("a", "a/"), ("a/.", "a")] {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a"), "A").unwrap();
-        let plan = Renamer::from_iter([(dir.path().join(source), dir.path().join(target))])
-            .plan()
-            .unwrap();
-        assert_eq!(plan.len(), 1);
-        assert!(plan.apply().is_err());
+        let report =
+            Renamer::from_iter([(dir.path().join(source), dir.path().join(target))]).prepare();
+        assert_eq!(report.rejected_count(), 1);
+        assert!(report.into_plan().is_err());
         assert_eq!(fs::read_to_string(dir.path().join("a")).unwrap(), "A");
     }
 }

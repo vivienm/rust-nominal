@@ -87,11 +87,11 @@ where
     /// required directory confinement before passing paths to this method.
     ///
     /// Parent aliases are resolved before checking the target or creating
-    /// directories, as in [`crate::Renamer::plan`]. A `..` component after a
+    /// directories, as in [`crate::Renamer::prepare`]. A `..` component after a
     /// missing directory is rejected because it cannot be resolved on disk.
     ///
     /// The target is checked for existence before renaming to avoid
-    /// overwriting it, using the same conflict rules as [`crate::Plan::check_fs`].
+    /// overwriting it, using the same conflict rules as [`crate::Plan::reject_conflicts`].
     /// The system rename also refuses replacement atomically, including if a
     /// target appears after the check. Linux, Android, Apple platforms and
     /// Windows are supported; other platforms or filesystems without this

@@ -4,6 +4,13 @@ use std::fs;
 
 use nominal::{PlanError, Renamer};
 
+fn plan_error(error: nominal::PreparationError) -> PlanError {
+    match error.rejections.into_iter().next().unwrap().reason {
+        nominal::RejectionReason::Plan(error) => error,
+        other => panic!("expected a planning diagnostic, got {other:?}"),
+    }
+}
+
 fn case_insensitive_dir() -> Option<tempfile::TempDir> {
     let configured = std::env::var_os("NOMINAL_CASE_INSENSITIVE_DIR");
     let dir = match &configured {
@@ -29,10 +36,11 @@ fn case_alias_chains_vacate_targets_first() {
         fs::write(p("a"), "A").unwrap();
         fs::write(p("b"), "B").unwrap();
         let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("B"), p("c"))])
-            .plan()
+            .prepare()
+            .into_plan()
             .unwrap();
         if check {
-            assert!(plan.check_fs().unwrap().is_empty());
+            assert!(plan.reject_conflicts().is_empty());
         }
         let results: Vec<_> = plan.apply_iter().map(Result::unwrap).collect();
         assert_eq!(results[0].source, p("B"));
@@ -51,10 +59,10 @@ fn case_alias_conflicts_propagate() {
     for name in ["a", "b", "c"] {
         fs::write(p(name), name).unwrap();
     }
-    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("B"), p("c"))])
-        .plan()
-        .unwrap();
-    assert_eq!(plan.check_fs().unwrap().len(), 2);
+    let (plan, conflicts) = Renamer::from_iter([(p("a"), p("b")), (p("B"), p("c"))])
+        .prepare()
+        .into_parts();
+    assert_eq!(conflicts.len(), 2);
     assert!(plan.is_empty());
     for name in ["a", "b", "c"] {
         assert_eq!(fs::read_to_string(p(name)).unwrap(), name);
@@ -69,8 +77,12 @@ fn existing_case_aliases_reject_duplicates_and_cycles() {
     let p = |name: &str| dir.path().join(name);
     fs::write(p("a"), "A").unwrap();
     fs::write(p("b"), "B").unwrap();
-    let plan =
-        |pairs: [(&str, &str); 2]| Renamer::from_iter(pairs.map(|(a, b)| (p(a), p(b)))).plan();
+    let plan = |pairs: [(&str, &str); 2]| {
+        Renamer::from_iter(pairs.map(|(a, b)| (p(a), p(b))))
+            .prepare()
+            .into_plan()
+            .map_err(plan_error)
+    };
     assert!(matches!(
         plan([("a", "c"), ("A", "d")]),
         Err(PlanError::DuplicateSource { .. })
@@ -93,10 +105,11 @@ fn case_only_rename_is_not_a_cycle_or_noop() {
     let p = |name: &str| dir.path().join(name);
     fs::write(p("lower"), "data").unwrap();
     let mut plan = Renamer::from_iter([(p("lower"), p("LOWER"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
     assert_eq!(plan.len(), 1);
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("LOWER")).unwrap(), "data");
     let names: Vec<_> = fs::read_dir(dir.path())
@@ -117,11 +130,15 @@ fn parent_case_aliases_share_missing_destinations() {
         (p("a"), p("folder/new/file")),
         (p("b"), p("FOLDER/new/file")),
     ])
-    .plan()
+    .prepare()
+    .into_plan()
+    .map_err(plan_error)
     .unwrap_err();
     assert!(matches!(error, PlanError::DuplicateTarget { .. }));
     let error = Renamer::from_iter([(p("folder"), p("moved")), (p("b"), p("FOLDER/new/file"))])
-        .plan()
+        .prepare()
+        .into_plan()
+        .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::OverlappingPaths { .. }));
 }
@@ -137,9 +154,10 @@ fn dangling_symlink_case_aliases_form_chains() {
     fs::write(p("a"), "A").unwrap();
     symlink("missing", p("b")).unwrap();
     let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("B"), p("c"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
     assert_eq!(
@@ -157,9 +175,10 @@ fn case_alias_parents_do_not_create_false_conflicts() {
     fs::create_dir(p("folder")).unwrap();
     fs::write(p("folder/a"), "data").unwrap();
     let mut plan = Renamer::from_iter([(p("folder/a"), p("FOLDER/A"))])
-        .plan()
+        .prepare()
+        .into_plan()
         .unwrap();
-    assert!(plan.check_fs().unwrap().is_empty());
+    assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("folder/A")).unwrap(), "data");
 }

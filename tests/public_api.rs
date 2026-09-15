@@ -8,7 +8,7 @@ fn apply_renames<'s, 't>(iter: ApplyIter<&'s str, &'t str>) -> Vec<Rename<&'s st
 
 #[test]
 fn iterator_types_are_publicly_accessible() {
-    let plan = Renamer::new().plan().unwrap();
+    let plan = Renamer::new().prepare().into_plan().unwrap();
     assert!(apply_renames(plan.apply_iter()).is_empty());
     let rename = Rename::new("source", "target");
     assert_eq!(<(&str, &str)>::from(rename), ("source", "target"));

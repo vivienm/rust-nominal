@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -9,6 +9,7 @@ use crate::{
     fsutil::{EntryKey, entry_key, entry_path},
     operation::Rename,
     plan::Plan,
+    preparation::{Preparation, Rejection, Rejections},
 };
 
 /// Prepares a batch file renaming operation.
@@ -69,7 +70,15 @@ where
     S: AsRef<Path>,
     T: AsRef<Path>,
 {
-    /// Consumes the renamer and returns a [`Plan`].
+    /// Prepares the batch and returns a report without changing the filesystem.
+    ///
+    /// [`Preparation::into_plan`] returns a plan only if there are no rejections.
+    /// [`Preparation::into_parts`] also exposes a partial plan for callers that
+    /// want to continue with independent valid operations. No-op operations
+    /// are omitted; every rejected operation is reported exactly once.
+    /// Duplicate contenders are all rejected, including intersecting groups.
+    /// Occupied targets and filesystem inspection failures are collected too.
+    /// Rejected operations cannot unblock dependent renames.
     ///
     /// Paths are anchored to the current directory at planning time. Existing
     /// parent directories are resolved to handle `..` and symlink aliases;
@@ -84,7 +93,7 @@ where
     /// Resolving aliases is not a confinement check.
     ///
     /// Existing case aliases are identified from filesystem metadata, using
-    /// the same conservative hard-link and symlink rules as [`Plan::check_fs`].
+    /// the same conservative hard-link and symlink rules as [`Plan::reject_conflicts`].
     /// Missing names are compared by spelling; case aliases between missing
     /// names can therefore collide only at execution time.
     ///
@@ -93,131 +102,167 @@ where
     /// as `out` and `out/child`, even when the source of `out` is a directory.
     /// Rename directories and their descendants in separate batches.
     ///
-    /// # Errors
-    ///
-    /// Returns a [`PlanError`] if a parent cannot be resolved, or if operations
-    /// have duplicate sources or targets (including parent aliases), overlapping
-    /// ancestor/descendant paths, or a cycle.
     /// A `..` component after a missing directory is rejected because its
-    /// filesystem meaning cannot be resolved.
-    pub fn plan(self) -> Result<Plan<S, T>, PlanError> {
-        let mut renames = self.renames;
-        renames.retain(|r| r.source.as_ref().as_os_str() != r.target.as_ref().as_os_str());
-
-        let mut paths = HashMap::with_capacity(2 * renames.len());
-        for rename in &renames {
-            for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                if !paths.contains_key(path.as_os_str()) {
-                    let resolved = entry_path(path).map_err(|source| PlanError::ResolvePath {
-                        path: path.to_path_buf(),
-                        source,
-                    })?;
-                    paths.insert(path.as_os_str().to_os_string(), resolved);
+    /// filesystem meaning cannot be resolved. Sorting failures reject all
+    /// otherwise retained operations rather than expose an unordered plan.
+    pub fn prepare(self) -> Preparation<S, T> {
+        let mut paths = HashMap::with_capacity(2 * self.renames.len());
+        let mut keys = HashMap::with_capacity(2 * self.renames.len());
+        let mut renames = Vec::with_capacity(self.renames.len());
+        let mut rejections = Vec::new();
+        for rename in self.renames {
+            if rename.source.as_ref().as_os_str() == rename.target.as_ref().as_os_str() {
+                continue;
+            }
+            let mut resolve = || -> Result<bool, PlanError> {
+                for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                    if !paths.contains_key(path.as_os_str()) {
+                        let resolved =
+                            entry_path(path).map_err(|source| PlanError::ResolvePath {
+                                path: path.to_path_buf(),
+                                source,
+                            })?;
+                        paths.insert(path.as_os_str().to_os_string(), resolved);
+                    }
                 }
-            }
-        }
-        // Execution paths must retain trailing separators and dots even though
-        // Path equality normalizes them.
-        renames.retain(|r| {
-            paths[r.source.as_ref().as_os_str()].as_os_str()
-                != paths[r.target.as_ref().as_os_str()].as_os_str()
-        });
-
-        let mut keys = HashMap::with_capacity(paths.len());
-        for (original, resolved) in &paths {
-            let key = entry_key(resolved).map_err(|source| PlanError::ResolvePath {
-                path: PathBuf::from(original),
-                source,
-            })?;
-            keys.insert(original.clone(), key);
-        }
-
-        let mut seen_sources = HashSet::with_capacity(renames.len());
-        let mut seen_targets = HashSet::with_capacity(renames.len());
-        for rename in &renames {
-            if !seen_sources.insert(&keys[rename.source.as_ref().as_os_str()]) {
-                return Err(PlanError::DuplicateSource {
-                    path: rename.source.as_ref().to_path_buf(),
-                });
-            }
-            if !seen_targets.insert(&keys[rename.target.as_ref().as_os_str()]) {
-                return Err(PlanError::DuplicateTarget {
-                    path: rename.target.as_ref().to_path_buf(),
-                });
+                // Compare execution spellings, retaining trailing constraints.
+                if paths[rename.source.as_ref().as_os_str()].as_os_str()
+                    == paths[rename.target.as_ref().as_os_str()].as_os_str()
+                {
+                    return Ok(false);
+                }
+                for path in [rename.source.as_ref(), rename.target.as_ref()] {
+                    if !keys.contains_key(path.as_os_str()) {
+                        let key = entry_key(&paths[path.as_os_str()]).map_err(|source| {
+                            PlanError::ResolvePath {
+                                path: path.to_path_buf(),
+                                source,
+                            }
+                        })?;
+                        keys.insert(path.as_os_str().to_os_string(), key);
+                    }
+                }
+                Ok(true)
+            };
+            match resolve() {
+                Ok(true) => renames.push(rename),
+                Ok(false) => {}
+                Err(error) => rejections.push(Rejection {
+                    renames: vec![rename],
+                    reason: error.into(),
+                }),
             }
         }
 
-        // Parent/child endpoints can invalidate each other's paths or require
-        // contradictory target types. Reject them before any operation runs.
-        let mut endpoints = HashMap::with_capacity(2 * renames.len());
-        for rename in &renames {
-            for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                endpoints.entry(&keys[path.as_os_str()]).or_insert(path);
+        let mut rejected = Rejections::new(renames.len());
+        let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+        let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+        let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+        for (index, rename) in renames.iter().enumerate() {
+            let source = &keys[rename.source.as_ref().as_os_str()];
+            let target = &keys[rename.target.as_ref().as_os_str()];
+            sources.entry(source).or_default().push(index);
+            targets.entry(target).or_default().push(index);
+            endpoints.entry(source).or_default().push(index);
+            if target != source {
+                endpoints.entry(target).or_default().push(index);
             }
         }
-        for rename in &renames {
+        // Visit in input order, not HashMap iteration order, for stable reports.
+        for (index, rename) in renames.iter().enumerate() {
+            let source_group = &sources[&keys[rename.source.as_ref().as_os_str()]];
+            if source_group.len() > 1 && source_group[0] == index {
+                rejected.mark(
+                    source_group.iter().copied(),
+                    PlanError::DuplicateSource {
+                        path: rename.source.as_ref().to_path_buf(),
+                    },
+                );
+            }
+            let target_group = &targets[&keys[rename.target.as_ref().as_os_str()]];
+            if target_group.len() > 1 && target_group[0] == index {
+                rejected.mark(
+                    target_group.iter().copied(),
+                    PlanError::DuplicateTarget {
+                        path: rename.target.as_ref().to_path_buf(),
+                    },
+                );
+            }
+        }
+        for (index, rename) in renames.iter().enumerate() {
             for path in [rename.source.as_ref(), rename.target.as_ref()] {
                 for ancestor in paths[path.as_os_str()].ancestors().skip(1) {
-                    let key = entry_key(ancestor).map_err(|source| PlanError::ResolvePath {
-                        path: path.to_path_buf(),
-                        source,
-                    })?;
-                    if let Some(original) = endpoints.get(&key) {
-                        return Err(PlanError::OverlappingPaths {
-                            ancestor_path: original.to_path_buf(),
-                            descendant_path: path.to_path_buf(),
-                        });
+                    let key = match entry_key(ancestor) {
+                        Ok(key) => key,
+                        Err(source) => {
+                            rejected.mark(
+                                [index],
+                                PlanError::ResolvePath {
+                                    path: path.to_path_buf(),
+                                    source,
+                                },
+                            );
+                            break;
+                        }
+                    };
+                    if let Some(owners) = endpoints.get(&key) {
+                        let owner = &renames[owners[0]];
+                        let original = if keys[owner.source.as_ref().as_os_str()] == key {
+                            owner.source.as_ref()
+                        } else {
+                            owner.target.as_ref()
+                        };
+                        rejected.mark(
+                            owners.iter().copied().chain([index]),
+                            PlanError::OverlappingPaths {
+                                ancestor_path: original.to_path_buf(),
+                                descendant_path: path.to_path_buf(),
+                            },
+                        );
                     }
                 }
             }
         }
+        let (mut renames, rejected) = rejected.partition(renames);
+        rejections.extend(rejected);
 
-        // Sort by target path first, so that independent operations come out in
-        // a deterministic order and ties in the topological sort below break by
-        // target.
-        #[cfg(feature = "unicode")]
-        {
-            use std::cmp::Ordering;
-
-            use icu_collator::{
-                Collator, CollatorBorrowed, CollatorPreferences, options::CollatorOptions,
-                preferences::CollationNumericOrdering,
-            };
-
-            let mut prefs = CollatorPreferences::default();
-            prefs.numeric_ordering = Some(CollationNumericOrdering::True);
-            let collator = Collator::try_new(prefs, CollatorOptions::default())?;
-
-            #[cfg(unix)]
-            fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
-                use std::os::unix::ffi::OsStrExt;
-
-                collator.compare_utf8(p1.as_os_str().as_bytes(), p2.as_os_str().as_bytes())
+        if !renames.is_empty() {
+            if let Err(error) = sort_by_target(&mut renames) {
+                rejections.push(Rejection {
+                    renames: std::mem::take(&mut renames),
+                    reason: error.into(),
+                });
+            } else if let Err(cycles) = topological_sort(&mut renames, &keys) {
+                // All cycles are known after one pass. Remove every cycle in
+                // one partition, then order the remaining acyclic operations.
+                let mut rejected = Rejections::new(renames.len());
+                let indices: HashMap<_, _> = renames
+                    .iter()
+                    .enumerate()
+                    .map(|(i, r)| (r.target.as_ref().as_os_str(), i))
+                    .collect();
+                for cycle in cycles {
+                    let members: Vec<_> = cycle.iter().map(|p| indices[p.as_os_str()]).collect();
+                    rejected.mark(
+                        members,
+                        PlanError::Cycle {
+                            cycles: vec![cycle],
+                        },
+                    );
+                }
+                let (retained, rejected) = rejected.partition(renames);
+                renames = retained;
+                rejections.extend(rejected);
+                topological_sort(&mut renames, &keys).expect("all cycles were removed");
             }
-
-            #[cfg(windows)]
-            fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
-                use std::os::windows::ffi::OsStrExt;
-
-                let p1: Vec<u16> = p1.as_os_str().encode_wide().collect();
-                let p2: Vec<u16> = p2.as_os_str().encode_wide().collect();
-                collator.compare_utf16(&p1, &p2)
-            }
-
-            renames
-                .sort_by(|r1, r2| compare_paths(&collator, r1.target.as_ref(), r2.target.as_ref()));
         }
-        #[cfg(not(feature = "unicode"))]
-        {
-            renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
-        }
-
-        topological_sort(&mut renames, &keys)?;
-        Ok(Plan {
+        let mut plan = Plan {
             renames,
             paths,
             keys,
-        })
+        };
+        rejections.extend(plan.reject_conflicts());
+        Preparation { plan, rejections }
     }
 }
 
@@ -247,13 +292,59 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
     }
 }
 
+/// Natural ordering with a lexical tie-break for distinct equivalent names.
+fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
+    renames: &mut [Rename<S, T>],
+) -> Result<(), PlanError> {
+    #[cfg(feature = "unicode")]
+    {
+        use std::cmp::Ordering;
+
+        use icu_collator::{
+            Collator, CollatorBorrowed, CollatorPreferences, options::CollatorOptions,
+            preferences::CollationNumericOrdering,
+        };
+
+        let mut prefs = CollatorPreferences::default();
+        prefs.numeric_ordering = Some(CollationNumericOrdering::True);
+        let collator = Collator::try_new(prefs, CollatorOptions::default())?;
+
+        #[cfg(unix)]
+        fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
+            use std::os::unix::ffi::OsStrExt;
+
+            collator.compare_utf8(p1.as_os_str().as_bytes(), p2.as_os_str().as_bytes())
+        }
+
+        #[cfg(windows)]
+        fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
+            use std::os::windows::ffi::OsStrExt;
+
+            let p1: Vec<u16> = p1.as_os_str().encode_wide().collect();
+            let p2: Vec<u16> = p2.as_os_str().encode_wide().collect();
+            collator.compare_utf16(&p1, &p2)
+        }
+
+        renames.sort_by(|r1, r2| {
+            let (a, b) = (r1.target.as_ref(), r2.target.as_ref());
+            compare_paths(&collator, a, b).then_with(|| a.as_os_str().cmp(b.as_os_str()))
+        });
+    }
+    #[cfg(not(feature = "unicode"))]
+    {
+        renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
+    }
+
+    Ok(())
+}
+
 /// Reorders renames so an operation that vacates a target runs before the
 /// operation that writes to that target. Returns
-/// [`PlanError::Cycle`] if no such ordering exists.
+/// the disjoint cycles if no such ordering exists.
 fn topological_sort<S, T>(
     renames: &mut [Rename<S, T>],
     keys: &HashMap<OsString, EntryKey>,
-) -> Result<(), PlanError>
+) -> Result<(), Vec<Vec<PathBuf>>>
 where
     S: AsRef<Path>,
     T: AsRef<Path>,
@@ -320,7 +411,7 @@ where
             }
             cycles.push(cycle);
         }
-        return Err(PlanError::Cycle { cycles });
+        return Err(cycles);
     }
 
     // Apply the permutation in place by following cycles.
@@ -337,108 +428,57 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::Renamer;
-    use crate::error::PlanError;
+    use crate::{PlanError, RejectionReason};
 
     #[test]
-    fn duplicate_source_is_rejected() {
-        let mut renamer = Renamer::new();
-        renamer.add("a", "b");
-        renamer.add("a", "c");
-
-        match renamer.plan() {
-            Err(PlanError::DuplicateSource { path }) => {
-                assert_eq!(path, PathBuf::from("a"));
-            }
-            other => panic!("expected DuplicateSource, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn duplicate_target_is_rejected() {
-        let mut renamer = Renamer::new();
-        renamer.add("a", "z");
-        renamer.add("b", "z");
-
-        match renamer.plan() {
-            Err(PlanError::DuplicateTarget { path }) => {
-                assert_eq!(path, PathBuf::from("z"));
-            }
-            other => panic!("expected DuplicateTarget, got {other:?}"),
+    fn duplicates_reject_every_contender() {
+        for (pairs, source) in [
+            ([("a", "b"), ("a", "c")], true),
+            ([("a", "z"), ("b", "z")], false),
+        ] {
+            let report = Renamer::from_iter(pairs).prepare();
+            assert_eq!(report.rejected_count(), 2);
+            assert!(
+                matches!(&report.rejections()[0].reason,
+                RejectionReason::Plan(PlanError::DuplicateSource { .. }) if source)
+                    || matches!(&report.rejections()[0].reason,
+                RejectionReason::Plan(PlanError::DuplicateTarget { .. }) if !source)
+            );
+            assert!(report.into_plan().is_err());
         }
     }
 
     #[test]
     fn duplicate_noop_is_ignored() {
-        // Both entries are no-ops and dropped before the duplicate check.
-        let mut renamer = Renamer::new();
-        renamer.add("a", "a");
-        renamer.add("a", "a");
-
-        let plan = renamer.plan().expect("no-ops should not collide");
+        let plan = Renamer::from_iter([("a", "a"), ("a", "a")])
+            .prepare()
+            .into_plan()
+            .unwrap();
         assert!(plan.is_empty());
     }
 
     #[test]
     fn chain_is_ordered_to_vacate_targets_first() {
-        // a -> b -> c: b must run before a, otherwise applying a -> b would
-        // collide with b's existing file.
-        let mut renamer = Renamer::new();
-        renamer.add("a", "b");
-        renamer.add("b", "c");
-
-        let plan = renamer.plan().expect("acyclic chain should plan");
+        let plan = Renamer::from_iter([("a", "b"), ("b", "c")])
+            .prepare()
+            .into_plan()
+            .unwrap();
         let order: Vec<_> = plan.renames.iter().map(|r| (r.source, r.target)).collect();
-        assert_eq!(order, vec![("b", "c"), ("a", "b")]);
-    }
-
-    #[test]
-    fn cycle_is_rejected() {
-        let mut renamer = Renamer::new();
-        renamer.add("a", "b");
-        renamer.add("b", "a");
-
-        match renamer.plan() {
-            Err(PlanError::Cycle { cycles }) => {
-                assert_eq!(cycles.len(), 1);
-                let mut targets = cycles.into_iter().next().unwrap();
-                targets.sort();
-                assert_eq!(targets, vec![PathBuf::from("a"), PathBuf::from("b")]);
-            }
-            other => panic!("expected Cycle, got {other:?}"),
-        }
+        assert_eq!(order, [("b", "c"), ("a", "b")]);
     }
 
     #[test]
     fn disjoint_cycles_are_grouped_separately() {
-        // Two independent swaps: a <-> b and c <-> d.
-        let mut renamer = Renamer::new();
-        renamer.add("a", "b");
-        renamer.add("b", "a");
-        renamer.add("c", "d");
-        renamer.add("d", "c");
-
-        match renamer.plan() {
-            Err(PlanError::Cycle { cycles }) => {
-                let mut normalized: Vec<Vec<PathBuf>> = cycles
-                    .into_iter()
-                    .map(|mut c| {
-                        c.sort();
-                        c
-                    })
-                    .collect();
-                normalized.sort();
-                assert_eq!(
-                    normalized,
-                    vec![
-                        vec![PathBuf::from("a"), PathBuf::from("b")],
-                        vec![PathBuf::from("c"), PathBuf::from("d")],
-                    ]
-                );
-            }
-            other => panic!("expected Cycle, got {other:?}"),
+        let report = Renamer::from_iter([("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]).prepare();
+        assert_eq!(report.rejected_count(), 4);
+        assert_eq!(report.rejections().len(), 2);
+        for rejection in report.rejections() {
+            assert_eq!(rejection.renames.len(), 2);
+            assert!(
+                matches!(&rejection.reason, RejectionReason::Plan(PlanError::Cycle { cycles }) if cycles.len() == 1 && cycles[0].len() == 2)
+            );
         }
+        assert!(report.into_parts().0.is_empty());
     }
 }
