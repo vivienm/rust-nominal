@@ -92,9 +92,10 @@ where
     ///
     /// The target is checked for existence before renaming to avoid
     /// overwriting it, using the same conflict rules as [`crate::Plan::check_fs`].
-    /// This check and the rename itself are not atomic:
-    /// a concurrent process creating the target between the two calls
-    /// can still be overwritten.
+    /// The system rename also refuses replacement atomically, including if a
+    /// target appears after the check. Linux, Android, Apple platforms and
+    /// Windows are supported; other platforms or filesystems without this
+    /// primitive return an I/O error. There is no overwriting fallback.
     ///
     /// When source and target are spelling variants of the same entry, the
     /// rename uses a temporary name beside the source. This ensures the
@@ -115,6 +116,11 @@ where
             {
                 return rename_via_temporary(source, target, rename_to_free_target);
             }
+            TargetState::SameEntry if has_plain_name(source) && has_plain_name(target) => {
+                // Identical entry names (possibly through parent aliases) need
+                // no system rename. Keep suffix constraints out of this case.
+                return Ok(());
+            }
             _ => {}
         }
 
@@ -125,8 +131,7 @@ where
             fs::create_dir_all(target_parent)?;
         }
         tracing::debug!("renaming {} to {}", source.display(), target.display());
-        fs::rename(source, target)?;
-        Ok(())
+        crate::noreplace::rename(source, target)
     }
 }
 
@@ -138,8 +143,15 @@ fn rename_to_free_target(source: &Path, target: &Path) -> Result<(), RenameError
         return Err(RenameError::TargetExists);
     }
     tracing::debug!("renaming {} to {}", source.display(), target.display());
-    fs::rename(source, target)?;
-    Ok(())
+    crate::noreplace::rename(source, target)
+}
+
+fn has_plain_name(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        path.as_os_str()
+            .as_encoded_bytes()
+            .ends_with(name.as_encoded_bytes())
+    })
 }
 
 fn rename_via_temporary(

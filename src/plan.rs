@@ -214,9 +214,10 @@ where
 
     /// Executes the plan, stopping at the first failure.
     ///
-    /// Each rename checks that its target does not exist before proceeding,
-    /// but this check is not atomic with the rename itself: a concurrent
-    /// process creating the target in between can still be overwritten.
+    /// Each system rename atomically refuses to replace an existing target,
+    /// including one created after preparation. See [`Rename::apply`] for
+    /// platform support. Paths and source identities are not locked against
+    /// concurrent changes, and the batch as a whole is not atomic.
     ///
     /// Case-only changes may use a temporary name; see [`Rename::apply`]
     /// for visibility and recovery behavior during those operations.
@@ -265,7 +266,7 @@ where
     /// The iterator runs each rename as it is pulled and yields either the
     /// completed [`Rename`] or an [`ApplyError`] describing the failure.
     /// Iteration continues after errors, so callers can choose to keep going
-    /// (best-effort) or stop early. The TOCTOU and partial-application
+    /// (best-effort) or stop early. The concurrent-change and partial-application
     /// caveats from [`apply`](Self::apply) apply to each step.
     ///
     /// # Examples

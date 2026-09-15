@@ -249,9 +249,11 @@ dependencies = [
  "icu_provider",
  "lscolors",
  "nu-ansi-term",
+ "rustix",
  "tempfile",
  "thiserror",
  "tracing",
+ "windows-sys",
 ]
 
 [[package]]

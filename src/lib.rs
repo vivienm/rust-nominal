@@ -30,6 +30,7 @@
 
 mod error;
 mod fsutil;
+mod noreplace;
 mod operation;
 mod plan;
 mod renamer;
