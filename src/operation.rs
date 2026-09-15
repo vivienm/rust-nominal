@@ -116,7 +116,9 @@ where
             {
                 return rename_via_temporary(source, target, rename_to_free_target);
             }
-            TargetState::SameEntry if has_plain_name(source) && has_plain_name(target) => {
+            TargetState::SameEntry
+                if ends_with_entry_name(source) && ends_with_entry_name(target) =>
+            {
                 // Identical entry names (possibly through parent aliases) need
                 // no system rename. Keep suffix constraints out of this case.
                 return Ok(());
@@ -146,7 +148,12 @@ fn rename_to_free_target(source: &Path, target: &Path) -> Result<(), RenameError
     crate::noreplace::rename(source, target)
 }
 
-fn has_plain_name(path: &Path) -> bool {
+/// Whether the raw path ends directly with its entry name.
+/// `file_name()` ignores trailing separators and `.` components, so compare
+/// against the raw spelling: `dir` passes, but `dir/` and `dir/.` do not.
+/// This prevents same-entry no-op detection from bypassing the filesystem
+/// checks required by those suffixes.
+fn ends_with_entry_name(path: &Path) -> bool {
     path.file_name().is_some_and(|name| {
         path.as_os_str()
             .as_encoded_bytes()
