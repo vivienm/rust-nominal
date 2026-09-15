@@ -33,17 +33,35 @@ impl<S, T> Preparation<S, T> {
     /// Returns the plan only if every non-noop operation passed preparation.
     /// The error owns the paths of all rejected operations and their diagnostics,
     /// so it can be propagated even when the input paths were borrowed.
-    /// No renames are executed by this method.
+    /// No renames are executed by this method. This is a convenience wrapper
+    /// around [`Plan::try_from`]; `TryInto<Plan<S, T>>` is available too.
     pub fn into_plan(self) -> Result<Plan<S, T>, PreparationError>
     where
         S: AsRef<Path>,
         T: AsRef<Path>,
     {
-        if self.rejections.is_empty() {
-            Ok(self.plan)
+        self.try_into()
+    }
+
+    /// Returns the retained plan and all rejections for best-effort callers.
+    /// Inspect and report the rejections before executing the partial plan.
+    pub fn into_parts(self) -> (Plan<S, T>, Vec<Rejection<S, T>>) {
+        (self.plan, self.rejections)
+    }
+}
+
+/// Strict conversion of a preparation report into an executable plan.
+///
+/// This also provides `TryInto<Plan<S, T>>` for `Preparation<S, T>`.
+impl<S: AsRef<Path>, T: AsRef<Path>> TryFrom<Preparation<S, T>> for Plan<S, T> {
+    type Error = PreparationError;
+
+    fn try_from(preparation: Preparation<S, T>) -> Result<Self, Self::Error> {
+        if preparation.rejections.is_empty() {
+            Ok(preparation.plan)
         } else {
             Err(PreparationError {
-                rejections: self
+                rejections: preparation
                     .rejections
                     .into_iter()
                     .map(|rejection| Rejection {
@@ -62,12 +80,6 @@ impl<S, T> Preparation<S, T> {
                     .collect(),
             })
         }
-    }
-
-    /// Returns the retained plan and all rejections for best-effort callers.
-    /// Inspect and report the rejections before executing the partial plan.
-    pub fn into_parts(self) -> (Plan<S, T>, Vec<Rejection<S, T>>) {
-        (self.plan, self.rejections)
     }
 }
 

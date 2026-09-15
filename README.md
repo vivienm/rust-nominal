@@ -18,6 +18,9 @@ fn main() -> Result<(), nominal::Error> {
 }
 ```
 
+`Plan::try_from(preparation)?` and `preparation.try_into()?` provide the same
+strict conversion as `preparation.into_plan()?`.
+
 Best-effort callers can report rejected operations and apply the retained plan:
 
 ```rust
