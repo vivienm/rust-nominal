@@ -168,12 +168,7 @@ where
                         .iter()
                         .map(|&i| renames[i].target.original.as_ref().to_path_buf())
                         .collect();
-                    rejected.mark(
-                        cycle,
-                        PlanError::Cycle {
-                            cycles: vec![paths],
-                        },
-                    );
+                    rejected.mark(cycle, PlanError::Cycle { paths });
                 }
                 let (retained, rejected) =
                     rejected.partition(renames, PreparedRename::into_original);
@@ -214,6 +209,8 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
     }
 }
 
+type EndpointIndex<'a> = HashMap<&'a EntryKey, Vec<usize>>;
+
 /// Collect path errors, duplicates and ancestor overlaps across the full batch.
 /// Invalid operations still participate through their successfully inspected paths.
 fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
@@ -225,9 +222,9 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
             rejected.mark([index], error);
         }
     }
-    let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
-    let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
-    let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+    let mut sources: EndpointIndex<'_> = HashMap::new();
+    let mut targets: EndpointIndex<'_> = HashMap::new();
+    let mut endpoints: EndpointIndex<'_> = HashMap::new();
     for (index, rename) in renames.iter().enumerate() {
         let source = rename.source.key();
         let target = rename.target.key();
@@ -242,6 +239,19 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
             }
         }
     }
+    // Keep the full input and a shared tracker: rejected operations must still
+    // participate in later checks, and the first diagnostic takes precedence.
+    reject_duplicates(renames, &sources, &targets, &mut rejected);
+    reject_overlaps(renames, &endpoints, &mut rejected);
+    rejected
+}
+
+fn reject_duplicates<S: AsRef<Path>, T: AsRef<Path>>(
+    renames: &[InspectedRename<S, T>],
+    sources: &EndpointIndex<'_>,
+    targets: &EndpointIndex<'_>,
+    rejected: &mut RejectionTracker,
+) {
     // Visit in input order, not HashMap iteration order, for stable reports.
     for (index, rename) in renames.iter().enumerate() {
         if let Some(key) = rename.source.key()
@@ -269,6 +279,13 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
             );
         }
     }
+}
+
+fn reject_overlaps<S: AsRef<Path>, T: AsRef<Path>>(
+    renames: &[InspectedRename<S, T>],
+    endpoints: &EndpointIndex<'_>,
+    rejected: &mut RejectionTracker,
+) {
     // Shared directories need only one successful inspection during overlap
     // validation. Borrow paths from the batch and discard this cache afterwards:
     // later preparation, conflict checks and execution must inspect afresh.
@@ -316,7 +333,6 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
             }
         }
     }
-    rejected
 }
 
 /// Natural ordering with a lexical tie-break for distinct equivalent names.
@@ -392,13 +408,13 @@ fn topological_sort<S, T>(renames: &mut [PreparedRename<S, T>]) -> Result<(), Ve
         }
     }
 
-    // Kahn's algorithm. `dest[i]` ends up as the new position of the element
+    // Kahn's algorithm. `new_positions[i]` ends up as the new position of the element
     // currently at index i.
-    let mut dest = vec![0usize; n];
+    let mut new_positions = vec![0usize; n];
     let mut placed = 0;
     let mut queue: VecDeque<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
     while let Some(i) = queue.pop_front() {
-        dest[i] = placed;
+        new_positions[i] = placed;
         placed += 1;
         if let Some(j) = successor[i] {
             indegree[j] -= 1;
@@ -436,10 +452,10 @@ fn topological_sort<S, T>(renames: &mut [PreparedRename<S, T>]) -> Result<(), Ve
 
     // Apply the permutation in place by following cycles.
     for i in 0..n {
-        while dest[i] != i {
-            let j = dest[i];
+        while new_positions[i] != i {
+            let j = new_positions[i];
             renames.swap(i, j);
-            dest.swap(i, j);
+            new_positions.swap(i, j);
         }
     }
 
@@ -505,8 +521,19 @@ mod tests {
         for rejection in report.rejections() {
             assert_eq!(rejection.renames.len(), 2);
             assert!(
-                matches!(&rejection.reason, RejectionReason::Plan(PlanError::Cycle { cycles }) if cycles.len() == 1 && cycles[0].len() == 2)
+                matches!(&rejection.reason, RejectionReason::Plan(PlanError::Cycle { paths }) if paths.len() == 2)
             );
+            let RejectionReason::Plan(PlanError::Cycle { paths }) = &rejection.reason else {
+                unreachable!();
+            };
+            let targets: Vec<_> = rejection
+                .renames
+                .iter()
+                .map(|rename| std::path::PathBuf::from(rename.target))
+                .collect();
+            let mut paths = paths.clone();
+            paths.sort();
+            assert_eq!(paths, targets);
         }
         assert!(report.into_parts().0.is_empty());
     }

@@ -54,13 +54,12 @@ pub enum PlanError {
         /// The original path naming a descendant entry.
         descendant_path: PathBuf,
     },
-    /// The rename operations contain one or more cycles that cannot be
-    /// resolved with direct renames alone (e.g. a swap `a <-> b`).
-    #[error("rename cycle(s) detected: {cycles:?}")]
+    /// A cycle that cannot be resolved with direct renames alone
+    /// (e.g. a swap `a <-> b`). Each cycle is reported as a separate rejection.
+    #[error("rename cycle detected: {paths:?}")]
     Cycle {
-        /// The cycles found in the rename graph. Each inner `Vec` lists the
-        /// target paths of one cycle.
-        cycles: Vec<Vec<PathBuf>>,
+        /// The original target paths of the operations in this cycle.
+        paths: Vec<PathBuf>,
     },
 }
 

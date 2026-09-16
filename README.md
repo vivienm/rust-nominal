@@ -105,6 +105,10 @@ and `Error::Filesystem` variants and their `From` conversions have been removed.
 Inspect `PreparationError::rejections` and `RejectionReason` for the individual
 `PlanError` and `FsError` diagnostics.
 
+`PlanError::Cycle { paths }` describes a single cycle as a flat list of target
+paths. Replace matches on the former `cycles` field accordingly; disjoint cycles
+are reported in separate rejections.
+
 ## Preparation benchmark
 
 Run `cargo bench --bench preparation --all-features` to measure batches of

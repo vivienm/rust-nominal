@@ -128,7 +128,7 @@ type Partition<R, S, T> = (Vec<R>, Vec<Rejection<S, T>>);
 /// conflicts against the entire batch. This prevents an arbitrary survivor
 /// when duplicate-source, duplicate-target and overlap groups intersect.
 pub(crate) struct RejectionTracker {
-    owners: Vec<Option<usize>>,
+    rejection_by_operation: Vec<Option<usize>>,
     reasons: Vec<RejectionReason>,
 }
 
@@ -137,7 +137,7 @@ impl RejectionTracker {
     /// batch length used by `mark` and `partition`, not an allocation hint.
     pub(crate) fn new(operation_count: usize) -> Self {
         Self {
-            owners: vec![None; operation_count],
+            rejection_by_operation: vec![None; operation_count],
             reasons: Vec::new(),
         }
     }
@@ -150,8 +150,8 @@ impl RejectionTracker {
         let group = self.reasons.len();
         let mut assigned = false;
         for index in indices {
-            if self.owners[index].is_none() {
-                self.owners[index] = Some(group);
+            if self.rejection_by_operation[index].is_none() {
+                self.rejection_by_operation[index] = Some(group);
                 assigned = true;
             }
         }
@@ -167,6 +167,9 @@ impl RejectionTracker {
         renames: Vec<R>,
         mut into_original: impl FnMut(R) -> Rename<S, T>,
     ) -> Partition<R, S, T> {
+        if self.reasons.is_empty() {
+            return (renames, Vec::new());
+        }
         let mut groups: Vec<_> = self
             .reasons
             .into_iter()
@@ -176,8 +179,8 @@ impl RejectionTracker {
             })
             .collect();
         let mut retained = Vec::new();
-        for (rename, owner) in renames.into_iter().zip(self.owners) {
-            if let Some(group) = owner {
+        for (rename, rejection) in renames.into_iter().zip(self.rejection_by_operation) {
+            if let Some(group) = rejection {
                 groups[group].renames.push(into_original(rename));
             } else {
                 retained.push(rename);
