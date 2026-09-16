@@ -341,10 +341,8 @@ fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
 ) -> Result<(), PlanError> {
     #[cfg(feature = "unicode")]
     {
-        use std::cmp::Ordering;
-
         use icu_collator::{
-            Collator, CollatorBorrowed, CollatorPreferences, options::CollatorOptions,
+            Collator, CollatorPreferences, options::CollatorOptions,
             preferences::CollationNumericOrdering,
         };
 
@@ -353,25 +351,24 @@ fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
         let collator = Collator::try_new(prefs, CollatorOptions::default())?;
 
         #[cfg(unix)]
-        fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
+        {
             use std::os::unix::ffi::OsStrExt;
 
-            collator.compare_utf8(p1.as_os_str().as_bytes(), p2.as_os_str().as_bytes())
+            renames.sort_by(|r1, r2| {
+                let (a, b) = (r1.target.original.as_ref(), r2.target.original.as_ref());
+                collator
+                    .compare_utf8(a.as_os_str().as_bytes(), b.as_os_str().as_bytes())
+                    .then_with(|| a.as_os_str().cmp(b.as_os_str()))
+            });
         }
-
         #[cfg(windows)]
-        fn compare_paths(collator: &CollatorBorrowed<'_>, p1: &Path, p2: &Path) -> Ordering {
+        {
             use std::os::windows::ffi::OsStrExt;
 
-            let p1: Vec<u16> = p1.as_os_str().encode_wide().collect();
-            let p2: Vec<u16> = p2.as_os_str().encode_wide().collect();
-            collator.compare_utf16(&p1, &p2)
+            sort_by_cached_utf16(renames, &collator, |path| {
+                path.as_os_str().encode_wide().collect()
+            });
         }
-
-        renames.sort_by(|r1, r2| {
-            let (a, b) = (r1.target.original.as_ref(), r2.target.original.as_ref());
-            compare_paths(&collator, a, b).then_with(|| a.as_os_str().cmp(b.as_os_str()))
-        });
     }
     #[cfg(not(feature = "unicode"))]
     {
@@ -379,6 +376,35 @@ fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
     }
 
     Ok(())
+}
+
+/// Encode each target once rather than allocating two UTF-16 buffers per
+/// comparison. Sort indices first, keeping the original operations in place
+/// until the buffers and their borrowed input paths are no longer needed.
+#[cfg(all(feature = "unicode", any(windows, test)))]
+fn sort_by_cached_utf16<S, T: AsRef<Path>>(
+    renames: &mut [PreparedRename<S, T>],
+    collator: &icu_collator::CollatorBorrowed<'_>,
+    encode: impl Fn(&Path) -> Vec<u16>,
+) {
+    let mut order: Vec<_> = renames
+        .iter()
+        .enumerate()
+        .map(|(index, rename)| {
+            let path = rename.target.original.as_ref();
+            (index, path, encode(path))
+        })
+        .collect();
+    order.sort_by(|(_, a, a_wide), (_, b, b_wide)| {
+        collator
+            .compare_utf16(a_wide, b_wide)
+            .then_with(|| a.as_os_str().cmp(b.as_os_str()))
+    });
+    let mut new_positions = vec![0; renames.len()];
+    for (position, (index, _, _)) in order.into_iter().enumerate() {
+        new_positions[index] = position;
+    }
+    apply_permutation(renames, &mut new_positions);
 }
 
 /// Reorders renames so an operation that vacates a target runs before the
@@ -450,22 +476,76 @@ fn topological_sort<S, T>(renames: &mut [PreparedRename<S, T>]) -> Result<(), Ve
         return Err(cycles);
     }
 
-    // Apply the permutation in place by following cycles.
-    for i in 0..n {
+    apply_permutation(renames, &mut new_positions);
+    Ok(())
+}
+
+/// Move each original element `i` to `new_positions[i]` in place. The supplied
+/// permutation is consumed by swapping its entries alongside the values.
+fn apply_permutation<T>(values: &mut [T], new_positions: &mut [usize]) {
+    for i in 0..values.len() {
         while new_positions[i] != i {
             let j = new_positions[i];
-            renames.swap(i, j);
+            values.swap(i, j);
             new_positions.swap(i, j);
         }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::Renamer;
     use crate::{PlanError, RejectionReason};
+
+    #[cfg(feature = "unicode")]
+    #[test]
+    fn cached_utf16_sort_encodes_once_and_preserves_rename_pairs() {
+        use std::{cell::Cell, fs};
+
+        use icu_collator::{
+            Collator, CollatorPreferences, options::CollatorOptions,
+            preferences::CollationNumericOrdering,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let pairs = [
+            ("a", "photo📷10.jpg"),
+            ("b", "photo📷2.jpg"),
+            ("c", "photo📷1.jpg"),
+            ("d", "photo📷01.jpg"),
+        ];
+        for (source, _) in pairs {
+            fs::write(dir.path().join(source), source).unwrap();
+        }
+        let mut plan = Renamer::from_iter(
+            pairs.map(|(source, target)| (dir.path().join(source), dir.path().join(target))),
+        )
+        .prepare()
+        .into_plan()
+        .unwrap();
+        // Exercise a permutation cycle longer than a single swap.
+        plan.renames.rotate_left(1);
+        let mut prefs = CollatorPreferences::default();
+        prefs.numeric_ordering = Some(CollationNumericOrdering::True);
+        let collator = Collator::try_new(prefs, CollatorOptions::default()).unwrap();
+        let encoded = Cell::new(0);
+        // Exercise the Windows sorting algorithm on every test platform,
+        // including numeric ties and a character represented by two UTF-16 units.
+        super::sort_by_cached_utf16(&mut plan.renames, &collator, |path| {
+            encoded.set(encoded.get() + 1);
+            path.to_str().unwrap().encode_utf16().collect()
+        });
+        assert_eq!(encoded.get(), pairs.len());
+        let sources: Vec<_> = plan
+            .iter()
+            .map(|rename| rename.source.resolved.file_name().unwrap())
+            .collect();
+        assert_eq!(sources, ["d", "c", "b", "a"]);
+        plan.apply().unwrap();
+        for (source, target) in pairs {
+            assert_eq!(fs::read_to_string(dir.path().join(target)).unwrap(), source);
+        }
+    }
 
     #[test]
     fn duplicates_reject_every_contender() {
