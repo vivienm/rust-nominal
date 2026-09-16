@@ -209,7 +209,37 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
     }
 }
 
-type EndpointIndex<'a> = HashMap<&'a EntryKey, Vec<usize>>;
+/// Most endpoints belong to a single operation. Allocate only when another
+/// operation shares the key, keeping each group nonempty and in input order.
+enum OperationIndices {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl OperationIndices {
+    fn push(&mut self, index: usize) {
+        match self {
+            Self::One(first) => *self = Self::Many(vec![*first, index]),
+            Self::Many(indices) => indices.push(index),
+        }
+    }
+
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::One(index) => std::slice::from_ref(index),
+            Self::Many(indices) => indices,
+        }
+    }
+}
+
+type EndpointIndex<'a> = HashMap<&'a EntryKey, OperationIndices>;
+
+fn index_endpoint<'a>(index: &mut EndpointIndex<'a>, key: &'a EntryKey, operation: usize) {
+    index
+        .entry(key)
+        .and_modify(|indices| indices.push(operation))
+        .or_insert(OperationIndices::One(operation));
+}
 
 /// Collect path errors, duplicates and ancestor overlaps across the full batch.
 /// Invalid operations still participate through their successfully inspected paths.
@@ -229,13 +259,13 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
         let source = rename.source.key();
         let target = rename.target.key();
         if let Some(source) = source {
-            sources.entry(source).or_default().push(index);
-            endpoints.entry(source).or_default().push(index);
+            index_endpoint(&mut sources, source, index);
+            index_endpoint(&mut endpoints, source, index);
         }
         if let Some(target) = target {
-            targets.entry(target).or_default().push(index);
+            index_endpoint(&mut targets, target, index);
             if Some(target) != source {
-                endpoints.entry(target).or_default().push(index);
+                index_endpoint(&mut endpoints, target, index);
             }
         }
     }
@@ -255,7 +285,7 @@ fn reject_duplicates<S: AsRef<Path>, T: AsRef<Path>>(
     // Visit in input order, not HashMap iteration order, for stable reports.
     for (index, rename) in renames.iter().enumerate() {
         if let Some(key) = rename.source.key()
-            && let source_group = &sources[key]
+            && let source_group = sources[key].as_slice()
             && source_group.len() > 1
             && source_group[0] == index
         {
@@ -267,7 +297,7 @@ fn reject_duplicates<S: AsRef<Path>, T: AsRef<Path>>(
             );
         }
         if let Some(key) = rename.target.key()
-            && let target_group = &targets[key]
+            && let target_group = targets[key].as_slice()
             && target_group.len() > 1
             && target_group[0] == index
         {
@@ -316,6 +346,7 @@ fn reject_overlaps<S: AsRef<Path>, T: AsRef<Path>>(
                     },
                 };
                 if let Some(owners) = endpoints.get(key) {
+                    let owners = owners.as_slice();
                     let owner = &renames[owners[0]];
                     let original = if owner.source.key() == Some(key) {
                         owner.source.original().as_ref()

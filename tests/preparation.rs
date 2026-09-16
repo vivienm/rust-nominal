@@ -92,6 +92,49 @@ fn intersecting_duplicate_groups_have_no_arbitrary_survivor_or_double_count() {
 }
 
 #[test]
+fn large_intersecting_duplicate_groups_reject_every_contender() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        fs::write(p("shared"), "shared").unwrap();
+        fs::write(p("independent"), "independent").unwrap();
+        let mut pairs = Vec::new();
+        for index in 0..8 {
+            let source = p(&format!("source-{index}"));
+            fs::write(&source, "contender").unwrap();
+            pairs.push((p("shared"), p(&format!("target-{index}"))));
+            pairs.push((source, p("target-0")));
+        }
+        let mut expected = pairs.clone();
+        expected.sort();
+        pairs.push((p("independent"), p("done")));
+        if reverse {
+            pairs.reverse();
+        }
+        let (plan, rejections) = Renamer::from_iter(pairs).prepare().into_parts();
+        assert_eq!(rejections.len(), 2);
+        let mut rejected: Vec<_> = rejections
+            .iter()
+            .flat_map(|r| &r.renames)
+            .map(|r| (r.source.clone(), r.target.clone()))
+            .collect();
+        rejected.sort();
+        assert_eq!(rejected, expected);
+        assert_eq!(plan.len(), 1);
+        plan.apply().unwrap();
+        assert_eq!(fs::read_to_string(p("done")).unwrap(), "independent");
+        assert_eq!(fs::read_to_string(p("shared")).unwrap(), "shared");
+        for index in 0..8 {
+            assert_eq!(
+                fs::read_to_string(p(&format!("source-{index}"))).unwrap(),
+                "contender"
+            );
+            assert!(!p(&format!("target-{index}")).exists());
+        }
+    }
+}
+
+#[test]
 fn overlaps_reject_all_affected_operations_but_keep_siblings() {
     let dir = tempfile::tempdir().unwrap();
     let p = |name| dir.path().join(name);
