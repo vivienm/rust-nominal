@@ -76,9 +76,10 @@ consume the plan.
   restoration reports the retained temporary path; it does not delete the data.
 - A batch is not a transaction. Completed renames are not rolled back, and source
   paths and parent directories are not locked against concurrent changes.
-- Preparation does not guarantee source existence, permissions or same-volume
-  destinations. Application can still fail. Missing destination parents are
-  created during application; cross-filesystem copying is not supported.
+- Preparation rejects missing sources (except discarded no-ops), accepting
+  dangling symlinks as existing entries. Sources can still disappear afterwards;
+  permissions and same-volume destinations are not guaranteed. Missing destination
+  parents are created during application; cross-filesystem copying is not supported.
 - Symlinks themselves can be renamed. Paths are unrestricted: directory
   confinement, when needed, is the caller's responsibility.
 - Missing names are compared by spelling. Case aliases between missing names
@@ -92,6 +93,10 @@ consume the plan.
   collation results.
 
 ## Migrating from 0.1
+
+Non-noop sources must now exist during preparation. Missing sources are reported
+as `FsError::Inspect` with a `NotFound` I/O error. They cannot consume files
+created by earlier operations in the same batch, including through case aliases.
 
 Replace `renamer.plan()?` and its initial `check_fs()` call with
 `renamer.prepare().into_plan()?` for strict handling, or

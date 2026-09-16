@@ -120,6 +120,36 @@ fn case_only_rename_is_not_a_cycle_or_noop() {
 }
 
 #[test]
+fn missing_source_cannot_consume_another_renames_case_alias() {
+    let Some(dir) = case_insensitive_dir() else {
+        return;
+    };
+    let p = |name: &str| dir.path().join(name);
+    fs::write(p("source"), "original").unwrap();
+    let pairs = [(p("source"), p("a")), (p("A"), p("z"))];
+    assert!(
+        Renamer::from_iter(pairs.clone())
+            .prepare()
+            .into_plan()
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(p("source")).unwrap(), "original");
+    assert!(!p("a").exists());
+    let (plan, rejections) = Renamer::from_iter(pairs).prepare().into_parts();
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].renames[0].source, p("A"));
+    assert!(matches!(
+        &rejections[0].reason,
+        nominal::RejectionReason::Filesystem(nominal::FsError::Inspect { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+    ));
+    assert_eq!(plan.len(), 1);
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("a")).unwrap(), "original");
+    assert!(!p("z").exists());
+}
+
+#[test]
 fn parent_case_aliases_share_missing_destinations() {
     let Some(dir) = case_insensitive_dir() else {
         return;

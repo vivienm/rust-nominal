@@ -81,6 +81,8 @@ where
     /// when an operation's other endpoint cannot be resolved.
     /// If both endpoints fail path inspection, the source error takes priority.
     /// Occupied targets and filesystem inspection failures are collected too.
+    /// Non-noop sources must exist; dangling symlinks count as existing entries.
+    /// Missing sources are rejected before any operation is executed.
     /// Rejected operations cannot unblock dependent renames.
     ///
     /// Paths are anchored to the current directory at planning time. Existing
@@ -610,15 +612,19 @@ mod tests {
 
     #[test]
     fn chain_is_ordered_to_vacate_targets_first() {
-        let plan = Renamer::from_iter([("a", "b"), ("b", "c")])
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        std::fs::write(p("a"), "A").unwrap();
+        std::fs::write(p("b"), "B").unwrap();
+        let plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c"))])
             .prepare()
             .into_plan()
             .unwrap();
         let order: Vec<_> = plan
             .iter()
-            .map(|r| (*r.source.original, *r.target.original))
+            .map(|r| (r.source.original.clone(), r.target.original.clone()))
             .collect();
-        assert_eq!(order, [("b", "c"), ("a", "b")]);
+        assert_eq!(order, [(p("b"), p("c")), (p("a"), p("b"))]);
     }
 
     #[test]

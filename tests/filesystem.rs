@@ -92,7 +92,17 @@ fn missing_source_does_not_hide_existing_target() {
     let source = dir.path().join("missing");
     let target = dir.path().join("target");
     fs::write(&target, "keep me").unwrap();
-    assert_conflict(&source, &target);
+    let error = Renamer::from_iter([(&source, &target)])
+        .prepare()
+        .into_plan()
+        .unwrap_err();
+    assert!(matches!(&error.rejections[0].reason,
+        RejectionReason::Filesystem(FsError::Inspect { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound));
+    assert!(matches!(
+        Rename::new(&source, &target).apply(),
+        Err(RenameError::TargetExists)
+    ));
     assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
 }
 

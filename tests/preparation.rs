@@ -2,9 +2,59 @@
 
 use std::{fs, path::PathBuf};
 
-#[cfg(unix)]
-use nominal::FsError;
-use nominal::{PlanError, RejectionReason, Renamer};
+use nominal::{FsError, PlanError, RejectionReason, Renamer};
+
+#[test]
+fn missing_sources_are_rejected_without_creating_destination_parents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let p = |name: &str| root.join(name);
+    fs::write(p("a"), "A").unwrap();
+    let (plan, rejections) = Renamer::from_iter([
+        (p("a"), p("b")),
+        (p("b"), p("new/c")),
+        (p("absent/source"), p("other/target")),
+        (p("noop"), p("noop")),
+    ])
+    .prepare()
+    .into_parts();
+    assert_eq!(rejections.len(), 2);
+    for rejection in &rejections {
+        assert!(matches!(&rejection.reason,
+            RejectionReason::Filesystem(FsError::Inspect { source_path, target_path, source })
+                if source.kind() == std::io::ErrorKind::NotFound
+                    && source_path == &rejection.renames[0].source
+                    && target_path == &rejection.renames[0].target));
+    }
+    // Even if a rejected source later appears, it is no longer executable.
+    fs::create_dir(p("absent")).unwrap();
+    fs::write(p("absent/source"), "late").unwrap();
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
+    assert_eq!(fs::read_to_string(p("absent/source")).unwrap(), "late");
+    assert!(!p("new").exists());
+    assert!(!p("other").exists());
+}
+
+#[test]
+fn recheck_inspects_missing_sources_even_when_their_target_will_be_vacated() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name: &str| dir.path().join(name);
+    for name in ["a", "b", "c"] {
+        fs::write(p(name), name).unwrap();
+    }
+    let mut plan = Renamer::from_iter([(p("a"), p("b")), (p("b"), p("c")), (p("c"), p("d"))])
+        .prepare()
+        .into_plan()
+        .unwrap();
+    fs::remove_file(p("b")).unwrap();
+    let rejections = plan.reject_conflicts();
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].renames[0].source, p("b"));
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "a");
+    assert_eq!(fs::read_to_string(p("d")).unwrap(), "c");
+}
 
 #[test]
 fn duplicate_groups_and_cycles_preserve_independent_chains() {
@@ -499,6 +549,8 @@ fn report_preserves_owned_payloads_without_requiring_clone() {
 fn equivalent_natural_names_have_a_deterministic_lexical_tie_break() {
     let dir = tempfile::tempdir().unwrap();
     let p = |name| dir.path().join(name);
+    fs::write(p("a"), "A").unwrap();
+    fs::write(p("b"), "B").unwrap();
     let pairs = [(p("a"), p("photo1.jpg")), (p("b"), p("photo01.jpg"))];
     let display = |pairs| {
         let plan = Renamer::from_iter(pairs).prepare().into_plan().unwrap();

@@ -248,11 +248,10 @@ fn normalization_preserves_trailing_directory_requirements() {
         let target = dir.path().join("b");
         fs::write(&source, "A").unwrap();
         let with_suffix = dir.path().join(format!("a{suffix}"));
-        let plan = Renamer::from_iter([(with_suffix, target.clone())])
+        let report = Renamer::from_iter([(with_suffix, target.clone())])
             .prepare()
-            .into_plan()
-            .unwrap();
-        assert!(plan.apply().is_err());
+            .into_plan();
+        assert!(report.is_err());
         assert_eq!(fs::read_to_string(&source).unwrap(), "A");
         assert!(!target.exists());
     }
@@ -410,8 +409,8 @@ fn batch_cache_preserves_each_sources_directory_suffix() {
             if reverse {
                 renames.reverse();
             }
-            let plan = Renamer::from_iter(renames).prepare().into_plan().unwrap();
-            assert!(plan.apply().is_err());
+            let report = Renamer::from_iter(renames).prepare();
+            assert!(report.into_plan().is_err());
             assert_eq!(fs::read_to_string(p("a")).unwrap(), "A");
             assert_eq!(fs::read_to_string(p("b")).unwrap(), "B");
             assert!(!p("c").exists());

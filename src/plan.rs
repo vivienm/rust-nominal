@@ -1,4 +1,4 @@
-use std::{collections::HashSet, io, path::Path, vec};
+use std::{collections::HashSet, fs, io, path::Path, vec};
 
 use crate::{
     error::{ApplyError, FsError},
@@ -113,8 +113,10 @@ impl<S, T> Plan<S, T> {
     ///
     /// ```
     /// # use nominal::{Plan, Renamer};
+    /// # let dir = tempfile::tempdir()?;
+    /// # std::fs::write(dir.path().join("old.txt"), "contents")?;
     /// let mut renamer = Renamer::new();
-    /// renamer.add("old.txt", "new.txt");
+    /// renamer.add(dir.path().join("old.txt"), dir.path().join("new.txt"));
     ///
     /// let plan = renamer.prepare().into_plan()?;
     /// assert_eq!(plan.len(), 1);
@@ -138,6 +140,7 @@ impl<S, T> Plan<S, T> {
     /// ```
     /// # use nominal::Renamer;
     /// # let dir = tempfile::tempdir()?;
+    /// # std::fs::write(dir.path().join("old"), "contents")?;
     /// let plan = Renamer::from_iter([(dir.path().join("old"), dir.path().join("new"))])
     ///     .prepare()
     ///     .into_plan()?;
@@ -218,7 +221,7 @@ impl<S, T> Plan<S, T> {
         })
     }
 
-    /// Rechecks destinations and removes operations with filesystem conflicts.
+    /// Rechecks sources and destinations and removes operations with filesystem errors.
     ///
     /// Preparation already performs this check. Call it again if the filesystem
     /// may have changed before execution. Each rejection includes the original
@@ -233,19 +236,24 @@ impl<S, T> Plan<S, T> {
     /// conservatively for existing targets, even for case-only changes. On other
     /// platforms, existing symlink targets are always rejected.
     ///
-    /// This preflight check does not reserve destinations. Execution also
-    /// refuses replacement atomically. Source existence, permissions and
-    /// cross-filesystem moves can still fail at execution time.
+    /// Sources must exist, including dangling symlinks. A missing source must
+    /// not consume a destination created by another operation in this batch.
+    /// No-ops have already been removed and are not inspected.
+    /// This preflight check does not reserve destinations or lock sources.
+    /// Execution also refuses replacement atomically. Later source removal,
+    /// permissions and cross-filesystem moves can still cause execution errors.
     pub fn reject_conflicts(&mut self) -> Vec<Rejection<S, T>> {
         let mut vacated: HashSet<&EntryKey> = HashSet::with_capacity(self.renames.len());
         let mut rejected = RejectionTracker::new(self.renames.len());
         for (index, rename) in self.renames.iter().enumerate() {
             let resolved = rename.resolved();
-            let conflict = if vacated.contains(rename.target.key()) {
-                Ok(false)
-            } else {
-                target_conflicts(resolved.source, resolved.target)
-            };
+            let conflict = fs::symlink_metadata(resolved.source).and_then(|_| {
+                if vacated.contains(rename.target.key()) {
+                    Ok(false)
+                } else {
+                    target_conflicts(resolved.source, resolved.target)
+                }
+            });
             match conflict {
                 Ok(false) => {
                     vacated.insert(rename.source.key());
