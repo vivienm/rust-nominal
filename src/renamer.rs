@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     path::Path,
 };
 
@@ -269,6 +269,10 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
             );
         }
     }
+    // Shared directories need only one successful inspection during overlap
+    // validation. Borrow paths from the batch and discard this cache afterwards:
+    // later preparation, conflict checks and execution must inspect afresh.
+    let mut ancestor_keys = HashMap::new();
     for (index, rename) in renames.iter().enumerate() {
         for (path, resolved) in [
             (rename.source.original().as_ref(), rename.source.resolved()),
@@ -278,22 +282,25 @@ fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
                 continue;
             };
             for ancestor in resolved.ancestors().skip(1) {
-                let key = match entry_key(ancestor) {
-                    Ok(key) => key,
-                    Err(source) => {
-                        rejected.mark(
-                            [index],
-                            PlanError::ResolvePath {
-                                path: path.to_path_buf(),
-                                source,
-                            },
-                        );
-                        break;
-                    }
+                let key: &EntryKey = match ancestor_keys.entry(ancestor) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => match entry_key(ancestor) {
+                        Ok(key) => entry.insert(key),
+                        Err(source) => {
+                            rejected.mark(
+                                [index],
+                                PlanError::ResolvePath {
+                                    path: path.to_path_buf(),
+                                    source,
+                                },
+                            );
+                            break;
+                        }
+                    },
                 };
-                if let Some(owners) = endpoints.get(&key) {
+                if let Some(owners) = endpoints.get(key) {
                     let owner = &renames[owners[0]];
-                    let original = if owner.source.key() == Some(&key) {
+                    let original = if owner.source.key() == Some(key) {
                         owner.source.original().as_ref()
                     } else {
                         owner.target.original().as_ref()

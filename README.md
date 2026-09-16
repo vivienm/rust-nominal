@@ -105,4 +105,13 @@ and `Error::Filesystem` variants and their `From` conversions have been removed.
 Inspect `PreparationError::rejections` and `RejectionReason` for the individual
 `PlanError` and `FsError` diagnostics.
 
+## Preparation benchmark
+
+Run `cargo bench --bench preparation --all-features` to measure batches of
+1,000 and 10,000 existing files, grouped into author directories with twenty
+books each. Both existing and missing destination directories are covered.
+The benchmark reports seven samples after a warm-up, excluding fixture setup,
+input collection and plan destruction; it does not execute the renames.
+Results depend on the filesystem and measure preparation with warm caches.
+
 [API documentation](https://vivienm.github.io/rust-nominal/docs/nominal/)

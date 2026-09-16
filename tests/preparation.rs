@@ -95,18 +95,23 @@ fn intersecting_duplicate_groups_have_no_arbitrary_survivor_or_double_count() {
 fn overlaps_reject_all_affected_operations_but_keep_siblings() {
     let dir = tempfile::tempdir().unwrap();
     let p = |name| dir.path().join(name);
-    fs::create_dir(p("folder")).unwrap();
+    fs::create_dir_all(p("folder/sub")).unwrap();
     fs::write(p("folder/child"), "child").unwrap();
+    fs::write(p("folder/sibling"), "sibling").unwrap();
+    fs::write(p("folder/sub/grandchild"), "grandchild").unwrap();
     fs::write(p("a"), "a").unwrap();
     let report = Renamer::from_iter([
         (p("folder"), p("moved")),
         (p("folder/child"), p("child")),
+        // Revisit the same ancestor, both directly and through a subdirectory.
+        (p("folder/sibling"), p("sibling")),
+        (p("folder/sub/grandchild"), p("grandchild")),
         (p("a"), p("b")),
     ])
     .prepare();
     assert_eq!(
         report.rejections().iter().flat_map(|r| &r.renames).count(),
-        2
+        4
     );
     assert!(matches!(
         &report.rejections()[0].reason,
@@ -114,6 +119,11 @@ fn overlaps_reject_all_affected_operations_but_keep_siblings() {
     ));
     report.into_parts().0.apply().unwrap();
     assert_eq!(fs::read_to_string(p("folder/child")).unwrap(), "child");
+    assert_eq!(fs::read_to_string(p("folder/sibling")).unwrap(), "sibling");
+    assert_eq!(
+        fs::read_to_string(p("folder/sub/grandchild")).unwrap(),
+        "grandchild"
+    );
     assert_eq!(fs::read_to_string(p("b")).unwrap(), "a");
 }
 

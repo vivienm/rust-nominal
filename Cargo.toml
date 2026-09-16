@@ -8,6 +8,10 @@ documentation = "https://vivienm.github.io/rust-nominal/docs/nominal/"
 license = "MIT"
 publish = false
 
+[[bench]]
+name = "preparation"
+harness = false
+
 [features]
 ansi = ["dep:lscolors", "dep:nu-ansi-term"]
 confirm = ["dep:dialoguer"]
