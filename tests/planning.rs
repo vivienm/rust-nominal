@@ -124,16 +124,24 @@ fn alias_noop_does_not_pretend_to_vacate_a_target() {
 #[test]
 fn absent_target_directories_are_created_after_planning() {
     let dir = tempfile::tempdir().unwrap();
-    let p = |name| dir.path().join(name);
-    fs::write(p("a"), "A").unwrap();
-    let mut plan = Renamer::from_iter([(p("a"), p("new/deep/b"))])
-        .prepare()
-        .into_plan()
-        .unwrap();
+    let p = |name: &str| dir.path().join(name);
+    for name in ["a", "b", "c"] {
+        fs::write(p(name), name).unwrap();
+    }
+    let mut plan =
+        Renamer::from_iter(["a", "b", "c"].map(|name| (p(name), p(&format!("new/deep/{name}")))))
+            .prepare()
+            .into_plan()
+            .unwrap();
     assert!(!p("new").exists());
     assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();
-    assert_eq!(fs::read_to_string(p("new/deep/b")).unwrap(), "A");
+    for name in ["a", "b", "c"] {
+        assert_eq!(
+            fs::read_to_string(p(&format!("new/deep/{name}"))).unwrap(),
+            name
+        );
+    }
 }
 
 #[test]
@@ -141,13 +149,54 @@ fn missing_parent_followed_by_dotdot_is_not_simplified() {
     let dir = tempfile::tempdir().unwrap();
     let p = |name| dir.path().join(name);
     fs::write(p("a"), "A").unwrap();
-    let error = Renamer::from_iter([(p("missing/../a"), p("b"))])
+    // Resolving a missing parent for one endpoint must not make a subsequent
+    // `..` through that parent valid, even when parent resolutions are cached.
+    let error = Renamer::from_iter([(p("a"), p("missing/first")), (p("missing/../a"), p("b"))])
         .prepare()
         .into_plan()
         .map_err(plan_error)
         .unwrap_err();
     assert!(matches!(error, PlanError::ResolvePath { .. }));
     assert!(p("a").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn shared_parent_resolutions_are_not_reused_between_preparations() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name: &str| dir.path().join(name);
+    for folder in ["first", "second"] {
+        fs::create_dir(p(folder)).unwrap();
+        for name in ["a", "b"] {
+            fs::write(p(&format!("{folder}/{name}")), format!("{folder}/{name}")).unwrap();
+        }
+    }
+    let pairs = || {
+        ["a", "b"].map(|name| {
+            (
+                p(&format!("alias/{name}")),
+                p(&format!("alias/{name}-renamed")),
+            )
+        })
+    };
+    symlink("first", p("alias")).unwrap();
+    let first = Renamer::from_iter(pairs()).prepare().into_plan().unwrap();
+    fs::remove_file(p("alias")).unwrap();
+    symlink("second", p("alias")).unwrap();
+    let second = Renamer::from_iter(pairs()).prepare().into_plan().unwrap();
+
+    first.apply().unwrap();
+    second.apply().unwrap();
+    for folder in ["first", "second"] {
+        for name in ["a", "b"] {
+            assert!(!p(&format!("{folder}/{name}")).exists());
+            assert_eq!(
+                fs::read_to_string(p(&format!("{folder}/{name}-renamed"))).unwrap(),
+                format!("{folder}/{name}"),
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

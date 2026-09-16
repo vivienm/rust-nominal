@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     PlanError, Rename,
-    fsutil::{EntryKey, IdentificationError, IdentifiedPath, ResolvedPath},
+    fsutil::{EntryKey, IdentificationError, IdentifiedPath, ResolvedPath, resolve_directory},
     plan::{PreparedPath, PreparedRename},
     preparation::Rejection,
 };
@@ -54,19 +54,33 @@ impl PathFailure {
 /// First phase: owned resolution results, with no shared mutable state.
 pub(crate) struct ResolutionCache {
     entries: HashMap<OsString, io::Result<ResolvedPath>>,
+    // Cache successful parent resolutions by spelling, without simplifying `..`
+    // or merging suffix constraints. Discard them before identification, so
+    // later preparations and execution always inspect the filesystem afresh.
+    parents: HashMap<OsString, PathBuf>,
 }
 
 impl ResolutionCache {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::with_capacity(capacity),
+            parents: HashMap::new(),
         }
     }
 
     pub(crate) fn resolve(&mut self, path: &Path) {
         if !self.entries.contains_key(path.as_os_str()) {
+            let resolved = ResolvedPath::with_parent_resolver(path, |parent| {
+                if !self.parents.contains_key(parent.as_os_str()) {
+                    self.parents.insert(
+                        parent.as_os_str().to_os_string(),
+                        resolve_directory(parent)?,
+                    );
+                }
+                Ok(self.parents[parent.as_os_str()].as_path())
+            });
             self.entries
-                .insert(path.as_os_str().to_os_string(), ResolvedPath::new(path));
+                .insert(path.as_os_str().to_os_string(), resolved);
         }
     }
 

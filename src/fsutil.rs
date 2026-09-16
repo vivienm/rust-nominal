@@ -21,7 +21,14 @@ impl ResolvedPath {
     /// the final directory entry. Missing parent directories are permitted so
     /// apply can create them later; trailing separators and `.` are preserved.
     pub(crate) fn new(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref();
+        Self::with_parent_resolver(path.as_ref(), resolve_directory)
+    }
+
+    /// Use the same endpoint rules with a preparation-local parent resolver.
+    pub(crate) fn with_parent_resolver<P: AsRef<Path>>(
+        path: &Path,
+        resolve_parent: impl FnOnce(&Path) -> io::Result<P>,
+    ) -> io::Result<Self> {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -32,7 +39,7 @@ impl ResolvedPath {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
-        let mut resolved = resolve_directory(parent)?.join(name);
+        let mut resolved = resolve_parent(parent)?.as_ref().join(name);
         // Path components omit trailing separators and `.`. Preserve these in the
         // executed path: `file/` must not silently become a valid rename of `file`.
         let raw = path.as_os_str().as_encoded_bytes();
@@ -64,7 +71,7 @@ impl From<ResolvedPath> for PathBuf {
     }
 }
 
-fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
     let mut unresolved = Vec::new();
     let mut current = path;
     let mut resolved = loop {
