@@ -32,6 +32,7 @@ mod error;
 mod fsutil;
 mod noreplace;
 mod operation;
+mod path_cache;
 mod plan;
 mod preparation;
 mod renamer;
@@ -39,7 +40,7 @@ mod renamer;
 pub use self::{
     error::{ApplyError, Error, FsError, PlanError, RenameError},
     operation::Rename,
-    plan::{ApplyIter, Plan},
+    plan::{ApplyIter, Plan, PlannedPath},
     preparation::{Preparation, PreparationError, Rejection, RejectionReason},
     renamer::Renamer,
 };

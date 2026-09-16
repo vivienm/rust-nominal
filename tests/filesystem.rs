@@ -44,8 +44,14 @@ fn assert_conflict(source: &Path, target: &Path) {
         report.rejections().iter().flat_map(|r| &r.renames).count(),
         1
     );
+    let resolved_target = target
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+        .join(target.file_name().unwrap());
     assert!(matches!(&report.rejections()[0].reason,
-        RejectionReason::Filesystem(FsError::TargetExists { target_path }) if target_path == target));
+        RejectionReason::Filesystem(FsError::TargetExists { target_path }) if target_path == &resolved_target));
     assert!(report.into_plan().is_err());
     assert!(matches!(
         Rename::new(source, target).apply(),
@@ -220,7 +226,11 @@ fn conflicts_propagate_through_chains_without_removing_independent_moves() {
             _ => panic!("unexpected conflict: {conflict:?}"),
         })
         .collect();
-    assert_eq!(targets, [p("d"), p("c"), p("b")]);
+    let resolved_root = dir.path().canonicalize().unwrap();
+    assert_eq!(
+        targets,
+        ["d", "c", "b"].map(|name| resolved_root.join(name))
+    );
     assert_eq!(plan.len(), 1);
     assert!(plan.reject_conflicts().is_empty());
     plan.apply().unwrap();

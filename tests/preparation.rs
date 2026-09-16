@@ -214,6 +214,90 @@ fn resolution_errors_keep_parent_aliases_and_dependent_renames_blocked() {
     assert_eq!(fs::read_to_string(p("done")).unwrap(), "independent");
 }
 
+#[test]
+fn failed_identification_keeps_its_own_resolved_path_for_overlap_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    for name in ["a", "b", "independent"] {
+        fs::write(p(name), name).unwrap();
+    }
+    let (plan, rejections) = Renamer::from_iter([
+        (p("a"), p("out/child\0")),
+        (p("b"), p("out")),
+        (p("independent"), p("done")),
+    ])
+    .prepare()
+    .into_parts();
+    assert_eq!(plan.len(), 1);
+    assert_eq!(rejections.len(), 2);
+    assert!(matches!(
+        &rejections[0].reason,
+        RejectionReason::Plan(PlanError::ResolvePath { path, .. })
+            if path == &p("out/child\0")
+    ));
+    assert!(matches!(
+        &rejections[1].reason,
+        RejectionReason::Plan(PlanError::OverlappingPaths { ancestor_path, descendant_path })
+            if ancestor_path == &p("out") && descendant_path == &p("out/child\0")
+    ));
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("done")).unwrap(), "independent");
+    assert!(p("a").exists());
+    assert!(p("b").exists());
+    assert!(!p("out").exists());
+}
+
+#[test]
+fn shared_failures_prefer_source_errors_regardless_of_inspection_phase() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    let pairs = [
+        (p("bad\0"), p("missing/../bad")),
+        (p("a"), p("bad\0")),
+        (p("b"), p("bad\0")),
+        (p("missing/../bad"), p("bad\0")),
+    ];
+    let (plan, rejections) = Renamer::from_iter(pairs.clone()).prepare().into_parts();
+    assert!(plan.is_empty());
+    assert_eq!(rejections.len(), pairs.len());
+    for (index, rejection) in rejections.iter().enumerate() {
+        assert_eq!(rejection.renames.len(), 1);
+        assert_eq!(rejection.renames[0].source, pairs[index].0);
+        assert_eq!(rejection.renames[0].target, pairs[index].1);
+        let RejectionReason::Plan(PlanError::ResolvePath { path, source }) = &rejection.reason
+        else {
+            panic!("expected a path diagnostic");
+        };
+        let expected = if index == 3 {
+            "missing/../bad"
+        } else {
+            "bad\0"
+        };
+        assert_eq!(path, &p(expected));
+        let expected_kind = if index == 3 {
+            std::io::ErrorKind::NotFound
+        } else {
+            std::io::ErrorKind::InvalidInput
+        };
+        assert_eq!(source.kind(), expected_kind);
+    }
+}
+
+#[test]
+fn alias_noops_are_discarded_before_identifying_invalid_final_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name| dir.path().join(name);
+    fs::create_dir(p("sub")).unwrap();
+    fs::write(p("a"), "A").unwrap();
+    let plan = Renamer::from_iter([(p("sub/../bad\0"), p("bad\0")), (p("a"), p("b"))])
+        .prepare()
+        .into_plan()
+        .unwrap();
+    assert_eq!(plan.len(), 1);
+    plan.apply().unwrap();
+    assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
+}
+
 #[cfg(unix)]
 #[test]
 fn path_and_inspection_errors_include_operations_and_do_not_abort_the_batch() {
@@ -234,13 +318,48 @@ fn path_and_inspection_errors_include_operations_and_do_not_abort_the_batch() {
     );
     assert!(matches!(&report.rejections()[0].reason,
         RejectionReason::Plan(PlanError::ResolvePath { path, .. }) if path == &p("missing/../target")));
+    let resolved_root = dir.path().canonicalize().unwrap();
     assert!(matches!(&report.rejections()[1].reason,
         RejectionReason::Filesystem(FsError::Inspect { source_path, target_path, .. })
-            if source_path == &p("b") && target_path.as_os_str() == p("blocked/").as_os_str()));
+            if source_path == &resolved_root.join("b")
+                && target_path.as_os_str() == resolved_root.join("blocked/").as_os_str()));
     assert_eq!(report.rejections()[1].renames[0].source, p("b"));
     report.into_parts().0.apply().unwrap();
     assert_eq!(fs::read_to_string(p("good")).unwrap(), "c");
     assert!(!p("missing").exists());
+}
+
+#[test]
+fn alias_noops_and_resolution_errors_preserve_an_independent_chain() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name| dir.path().join(name);
+        fs::create_dir(p("sub")).unwrap();
+        fs::write(p("a"), "A").unwrap();
+        fs::write(p("b"), "B").unwrap();
+        let mut pairs = [
+            (p("sub/../b"), p("b")), // Parent alias: a no-op.
+            (p("a"), p("b")),
+            (p("b"), p("c")),
+            (p("unrelated"), p("missing/../invalid")),
+        ];
+        if reverse {
+            pairs.reverse();
+        }
+        let (plan, rejections) = Renamer::from_iter(pairs).prepare().into_parts();
+        assert_eq!(plan.len(), 2);
+        assert_eq!(rejections.len(), 1);
+        assert_eq!(rejections[0].renames.len(), 1);
+        assert_eq!(rejections[0].renames[0].source, p("unrelated"));
+        assert!(matches!(
+            &rejections[0].reason,
+            RejectionReason::Plan(PlanError::ResolvePath { .. })
+        ));
+        plan.apply().unwrap();
+        assert_eq!(fs::read_to_string(p("b")).unwrap(), "A");
+        assert_eq!(fs::read_to_string(p("c")).unwrap(), "B");
+        assert!(!p("missing").exists());
+    }
 }
 
 #[test]
@@ -260,6 +379,11 @@ fn recheck_removes_new_conflicts_and_their_dependents() {
     assert_eq!(rejections.len(), 2);
     assert_eq!(rejections[0].renames[0].source, p("b"));
     assert_eq!(rejections[1].renames[0].source, p("a"));
+    let retained: Vec<_> = plan
+        .iter()
+        .map(|r| (r.source.original, r.target.original))
+        .collect();
+    assert_eq!(retained, [(&p("other"), &p("free"))]);
     plan.apply().unwrap();
     assert_eq!(fs::read_to_string(p("c")).unwrap(), "new arrival");
     assert_eq!(fs::read_to_string(p("free")).unwrap(), "other");
@@ -279,6 +403,7 @@ fn report_preserves_owned_payloads_without_requiring_clone() {
     }
     let dir = tempfile::tempdir().unwrap();
     let p = |name| dir.path().join(name);
+    fs::write(p("c"), "contents").unwrap();
     let report = Renamer::from_iter([
         (
             Source {
@@ -294,15 +419,26 @@ fn report_preserves_owned_payloads_without_requiring_clone() {
             },
             p("target"),
         ),
+        (
+            Source {
+                path: p("c"),
+                id: 9,
+            },
+            p("free"),
+        ),
     ])
     .prepare();
-    let (_, rejections) = report.into_parts();
+    let (plan, rejections) = report.into_parts();
     let ids: Vec<_> = rejections
         .into_iter()
         .flat_map(|r| r.renames)
         .map(|r| r.source.id)
         .collect();
     assert_eq!(ids, [7, 8]);
+    assert_eq!(plan.iter().next().unwrap().source.original.id, 9);
+    let completed: Vec<_> = plan.apply_iter().map(Result::unwrap).collect();
+    assert_eq!(completed[0].source.id, 9);
+    assert_eq!(fs::read_to_string(p("free")).unwrap(), "contents");
 }
 
 #[cfg(feature = "unicode")]

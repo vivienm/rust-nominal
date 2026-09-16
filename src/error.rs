@@ -73,16 +73,16 @@ pub enum FsError {
     /// The target path is occupied by another directory entry on disk.
     #[error("target {target_path:?} already exists")]
     TargetExists {
-        /// The target path of the conflicting rename.
+        /// The resolved target path captured during preparation.
         target_path: PathBuf,
     },
     /// The source or target could not be inspected. The affected operation is
     /// reported without guessing which path caused a multi-path check to fail.
     #[error("failed to inspect {source_path:?} -> {target_path:?}: {source}")]
     Inspect {
-        /// The original source path.
+        /// The resolved source path captured during preparation.
         source_path: PathBuf,
-        /// The original target path.
+        /// The resolved target path captured during preparation.
         target_path: PathBuf,
         /// The underlying filesystem error.
         source: io::Error,
@@ -94,9 +94,9 @@ pub enum FsError {
 #[error("failed to rename {source_path:?} to {target_path:?}: {source}")]
 #[non_exhaustive]
 pub struct ApplyError {
-    /// The source path of the rename operation.
+    /// The resolved source path captured during preparation.
     pub source_path: PathBuf,
-    /// The target path of the rename operation.
+    /// The resolved target path captured during preparation.
     pub target_path: PathBuf,
     /// The underlying rename error.
     pub source: RenameError,

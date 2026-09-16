@@ -2,7 +2,7 @@ use std::{fmt, fs, path::Path};
 
 use crate::{
     error::RenameError,
-    fsutil::{TargetState, common_ancestor, entry_path, target_state},
+    fsutil::{ResolvedPath, TargetState, common_ancestor, target_state},
 };
 
 /// A rename operation.
@@ -105,8 +105,8 @@ where
     /// also fails, [`RenameError::RecoveryFailed`] reports where the entry was
     /// retained; it is never deleted by temporary-directory cleanup.
     pub fn apply(&self) -> Result<(), RenameError> {
-        let source = entry_path(self.source.as_ref())?;
-        let target = entry_path(self.target.as_ref())?;
+        let source = ResolvedPath::new(&self.source)?;
+        let target = ResolvedPath::new(&self.target)?;
         let (source, target) = (source.as_path(), target.as_path());
 
         match target_state(source, target)? {

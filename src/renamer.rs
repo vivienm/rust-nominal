@@ -1,14 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::OsString,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use crate::{
     error::PlanError,
-    fsutil::{EntryKey, entry_key, entry_path},
+    fsutil::{EntryKey, entry_key},
     operation::Rename,
-    plan::Plan,
+    path_cache::{InspectedRename, ResolutionCache},
+    plan::{Plan, PreparedRename},
     preparation::{Preparation, Rejection, RejectionTracker},
 };
 
@@ -79,6 +79,7 @@ where
     /// Duplicate contenders are all rejected, including intersecting groups.
     /// Resolvable endpoints still participate in duplicate and overlap checks
     /// when an operation's other endpoint cannot be resolved.
+    /// If both endpoints fail path inspection, the source error takes priority.
     /// Occupied targets and filesystem inspection failures are collected too.
     /// Rejected operations cannot unblock dependent renames.
     ///
@@ -86,7 +87,7 @@ where
     /// parent directories are resolved to handle `..` and symlink aliases;
     /// missing parent directories are allowed. The final component is kept
     /// unchanged so symlinks themselves can be renamed. Original paths are
-    /// preserved for display and results.
+    /// preserved for inspection and results; plan output uses the captured paths.
     ///
     /// Paths are not confined to a library or working directory: absolute
     /// destinations and `..` in existing parent directories are supported.
@@ -108,185 +109,80 @@ where
     /// filesystem meaning cannot be resolved. Sorting failures reject all
     /// otherwise retained operations rather than expose an unordered plan.
     pub fn prepare(self) -> Preparation<S, T> {
-        let mut paths = HashMap::with_capacity(2 * self.renames.len());
-        let mut keys = HashMap::with_capacity(2 * self.renames.len());
+        let mut cache = ResolutionCache::with_capacity(2 * self.renames.len());
         let mut renames = Vec::with_capacity(self.renames.len());
-        let mut resolution_errors = Vec::new();
         for rename in self.renames {
             if rename.source.as_ref().as_os_str() == rename.target.as_ref().as_os_str() {
                 continue;
             }
-            let mut error = None;
-            // Resolve both endpoints independently: a failure at one end must
-            // not hide conflicts involving the other end.
-            for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                if !paths.contains_key(path.as_os_str()) {
-                    match entry_path(path) {
-                        Ok(resolved) => {
-                            paths.insert(path.as_os_str().to_os_string(), resolved);
-                        }
-                        Err(source) => {
-                            error.get_or_insert_with(|| PlanError::ResolvePath {
-                                path: path.to_path_buf(),
-                                source,
-                            });
-                        }
-                    }
-                }
-            }
-            // Compare execution spellings, retaining trailing constraints.
-            if error.is_none()
-                && paths[rename.source.as_ref().as_os_str()].as_os_str()
-                    == paths[rename.target.as_ref().as_os_str()].as_os_str()
+            // Resolve both endpoints before comparing execution spellings.
+            // Failures remain in the cache for the identification phase.
+            cache.resolve(rename.source.as_ref());
+            cache.resolve(rename.target.as_ref());
+            if let (Some(source), Some(target)) = (
+                cache.resolved(rename.source.as_ref()),
+                cache.resolved(rename.target.as_ref()),
+            ) && source.as_os_str() == target.as_os_str()
             {
                 continue;
-            }
-            for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                if let Some(resolved) = paths.get(path.as_os_str())
-                    && !keys.contains_key(path.as_os_str())
-                {
-                    match entry_key(resolved) {
-                        Ok(key) => {
-                            keys.insert(path.as_os_str().to_os_string(), key);
-                        }
-                        Err(source) => {
-                            error.get_or_insert_with(|| PlanError::ResolvePath {
-                                path: path.to_path_buf(),
-                                source,
-                            });
-                        }
-                    }
-                }
-            }
-            if let Some(error) = error {
-                resolution_errors.push((renames.len(), error));
             }
             renames.push(rename);
         }
 
-        let mut rejected = RejectionTracker::new(renames.len());
-        for (index, error) in resolution_errors {
-            rejected.mark([index], error);
-        }
-        let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
-        let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
-        let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
-        for (index, rename) in renames.iter().enumerate() {
-            let source = keys.get(rename.source.as_ref().as_os_str());
-            let target = keys.get(rename.target.as_ref().as_os_str());
-            if let Some(source) = source {
-                sources.entry(source).or_default().push(index);
-                endpoints.entry(source).or_default().push(index);
-            }
-            if let Some(target) = target {
-                targets.entry(target).or_default().push(index);
-                if Some(target) != source {
-                    endpoints.entry(target).or_default().push(index);
-                }
-            }
-        }
-        // Visit in input order, not HashMap iteration order, for stable reports.
-        for (index, rename) in renames.iter().enumerate() {
-            if let Some(key) = keys.get(rename.source.as_ref().as_os_str())
-                && let source_group = &sources[key]
-                && source_group.len() > 1
-                && source_group[0] == index
-            {
-                rejected.mark(
-                    source_group.iter().copied(),
-                    PlanError::DuplicateSource {
-                        path: rename.source.as_ref().to_path_buf(),
-                    },
-                );
-            }
-            if let Some(key) = keys.get(rename.target.as_ref().as_os_str())
-                && let target_group = &targets[key]
-                && target_group.len() > 1
-                && target_group[0] == index
-            {
-                rejected.mark(
-                    target_group.iter().copied(),
-                    PlanError::DuplicateTarget {
-                        path: rename.target.as_ref().to_path_buf(),
-                    },
-                );
+        let mut cache = cache.into_identification();
+        let renames: Vec<_> = renames
+            .into_iter()
+            .map(|rename| Rename::new(cache.inspect(rename.source), cache.inspect(rename.target)))
+            .collect();
+        // Every endpoint now carries its own result. Releasing the cache also
+        // lets the final owner of an identified path transfer its allocations.
+        drop(cache);
+
+        let rejected = validate_paths(&renames);
+        let (retained, mut rejections) =
+            rejected.partition(renames, InspectedRename::into_original);
+
+        let mut renames = Vec::with_capacity(retained.len());
+        for rename in retained {
+            match rename.into_prepared() {
+                Ok(rename) => renames.push(rename),
+                Err(rejection) => rejections.push(rejection),
             }
         }
-        for (index, rename) in renames.iter().enumerate() {
-            for path in [rename.source.as_ref(), rename.target.as_ref()] {
-                let Some(resolved) = paths.get(path.as_os_str()) else {
-                    continue;
-                };
-                for ancestor in resolved.ancestors().skip(1) {
-                    let key = match entry_key(ancestor) {
-                        Ok(key) => key,
-                        Err(source) => {
-                            rejected.mark(
-                                [index],
-                                PlanError::ResolvePath {
-                                    path: path.to_path_buf(),
-                                    source,
-                                },
-                            );
-                            break;
-                        }
-                    };
-                    if let Some(owners) = endpoints.get(&key) {
-                        let owner = &renames[owners[0]];
-                        let original = if keys.get(owner.source.as_ref().as_os_str()) == Some(&key)
-                        {
-                            owner.source.as_ref()
-                        } else {
-                            owner.target.as_ref()
-                        };
-                        rejected.mark(
-                            owners.iter().copied().chain([index]),
-                            PlanError::OverlappingPaths {
-                                ancestor_path: original.to_path_buf(),
-                                descendant_path: path.to_path_buf(),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-        let (mut renames, mut rejections) = rejected.partition(renames);
 
         if !renames.is_empty() {
             if let Err(error) = sort_by_target(&mut renames) {
                 rejections.push(Rejection {
-                    renames: std::mem::take(&mut renames),
+                    renames: std::mem::take(&mut renames)
+                        .into_iter()
+                        .map(PreparedRename::into_original)
+                        .collect(),
                     reason: error.into(),
                 });
-            } else if let Err(cycles) = topological_sort(&mut renames, &keys) {
+            } else if let Err(cycles) = topological_sort(&mut renames) {
                 // All cycles are known after one pass. Remove every cycle in
                 // one partition, then order the remaining acyclic operations.
                 let mut rejected = RejectionTracker::new(renames.len());
-                let indices: HashMap<_, _> = renames
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| (r.target.as_ref().as_os_str(), i))
-                    .collect();
                 for cycle in cycles {
-                    let members: Vec<_> = cycle.iter().map(|p| indices[p.as_os_str()]).collect();
+                    let paths = cycle
+                        .iter()
+                        .map(|&i| renames[i].target.original.as_ref().to_path_buf())
+                        .collect();
                     rejected.mark(
-                        members,
+                        cycle,
                         PlanError::Cycle {
-                            cycles: vec![cycle],
+                            cycles: vec![paths],
                         },
                     );
                 }
-                let (retained, rejected) = rejected.partition(renames);
+                let (retained, rejected) =
+                    rejected.partition(renames, PreparedRename::into_original);
                 renames = retained;
                 rejections.extend(rejected);
-                topological_sort(&mut renames, &keys).expect("all cycles were removed");
+                topological_sort(&mut renames).expect("all cycles were removed");
             }
         }
-        let mut plan = Plan {
-            renames,
-            paths,
-            keys,
-        };
+        let mut plan = Plan { renames };
         rejections.extend(plan.reject_conflicts());
         Preparation { plan, rejections }
     }
@@ -318,9 +214,107 @@ impl<S, T> Extend<(S, T)> for Renamer<S, T> {
     }
 }
 
+/// Collect path errors, duplicates and ancestor overlaps across the full batch.
+/// Invalid operations still participate through their successfully inspected paths.
+fn validate_paths<S: AsRef<Path>, T: AsRef<Path>>(
+    renames: &[InspectedRename<S, T>],
+) -> RejectionTracker {
+    let mut rejected = RejectionTracker::new(renames.len());
+    for (index, rename) in renames.iter().enumerate() {
+        if let Some(error) = rename.plan_error() {
+            rejected.mark([index], error);
+        }
+    }
+    let mut sources: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+    let mut targets: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+    let mut endpoints: HashMap<&EntryKey, Vec<usize>> = HashMap::new();
+    for (index, rename) in renames.iter().enumerate() {
+        let source = rename.source.key();
+        let target = rename.target.key();
+        if let Some(source) = source {
+            sources.entry(source).or_default().push(index);
+            endpoints.entry(source).or_default().push(index);
+        }
+        if let Some(target) = target {
+            targets.entry(target).or_default().push(index);
+            if Some(target) != source {
+                endpoints.entry(target).or_default().push(index);
+            }
+        }
+    }
+    // Visit in input order, not HashMap iteration order, for stable reports.
+    for (index, rename) in renames.iter().enumerate() {
+        if let Some(key) = rename.source.key()
+            && let source_group = &sources[key]
+            && source_group.len() > 1
+            && source_group[0] == index
+        {
+            rejected.mark(
+                source_group.iter().copied(),
+                PlanError::DuplicateSource {
+                    path: rename.source.original().as_ref().to_path_buf(),
+                },
+            );
+        }
+        if let Some(key) = rename.target.key()
+            && let target_group = &targets[key]
+            && target_group.len() > 1
+            && target_group[0] == index
+        {
+            rejected.mark(
+                target_group.iter().copied(),
+                PlanError::DuplicateTarget {
+                    path: rename.target.original().as_ref().to_path_buf(),
+                },
+            );
+        }
+    }
+    for (index, rename) in renames.iter().enumerate() {
+        for (path, resolved) in [
+            (rename.source.original().as_ref(), rename.source.resolved()),
+            (rename.target.original().as_ref(), rename.target.resolved()),
+        ] {
+            let Some(resolved) = resolved else {
+                continue;
+            };
+            for ancestor in resolved.ancestors().skip(1) {
+                let key = match entry_key(ancestor) {
+                    Ok(key) => key,
+                    Err(source) => {
+                        rejected.mark(
+                            [index],
+                            PlanError::ResolvePath {
+                                path: path.to_path_buf(),
+                                source,
+                            },
+                        );
+                        break;
+                    }
+                };
+                if let Some(owners) = endpoints.get(&key) {
+                    let owner = &renames[owners[0]];
+                    let original = if owner.source.key() == Some(&key) {
+                        owner.source.original().as_ref()
+                    } else {
+                        owner.target.original().as_ref()
+                    };
+                    rejected.mark(
+                        owners.iter().copied().chain([index]),
+                        PlanError::OverlappingPaths {
+                            ancestor_path: original.to_path_buf(),
+                            descendant_path: path.to_path_buf(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    rejected
+}
+
 /// Natural ordering with a lexical tie-break for distinct equivalent names.
 fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
-    renames: &mut [Rename<S, T>],
+    renames: &mut [PreparedRename<S, T>],
 ) -> Result<(), PlanError> {
     #[cfg(feature = "unicode")]
     {
@@ -352,41 +346,34 @@ fn sort_by_target<S: AsRef<Path>, T: AsRef<Path>>(
         }
 
         renames.sort_by(|r1, r2| {
-            let (a, b) = (r1.target.as_ref(), r2.target.as_ref());
+            let (a, b) = (r1.target.original.as_ref(), r2.target.original.as_ref());
             compare_paths(&collator, a, b).then_with(|| a.as_os_str().cmp(b.as_os_str()))
         });
     }
     #[cfg(not(feature = "unicode"))]
     {
-        renames.sort_by(|r1, r2| r1.target.as_ref().cmp(r2.target.as_ref()));
+        renames.sort_by(|r1, r2| r1.target.original.as_ref().cmp(r2.target.original.as_ref()));
     }
 
     Ok(())
 }
 
 /// Reorders renames so an operation that vacates a target runs before the
-/// operation that writes to that target. Returns
-/// the disjoint cycles if no such ordering exists.
-fn topological_sort<S, T>(
-    renames: &mut [Rename<S, T>],
-    keys: &HashMap<OsString, EntryKey>,
-) -> Result<(), Vec<Vec<PathBuf>>>
-where
-    S: AsRef<Path>,
-    T: AsRef<Path>,
-{
+/// operation that writes to that target. On failure, leaves the slice unchanged
+/// and returns the disjoint cycles as indices into that slice.
+fn topological_sort<S, T>(renames: &mut [PreparedRename<S, T>]) -> Result<(), Vec<Vec<usize>>> {
     let n = renames.len();
     let target_to_idx: HashMap<&EntryKey, usize> = renames
         .iter()
         .enumerate()
-        .map(|(i, r)| (&keys[r.target.as_ref().as_os_str()], i))
+        .map(|(i, r)| (r.target.key(), i))
         .collect();
 
     let mut indegree = vec![0usize; n];
     // Each rename has a single source, so at most one outgoing edge.
     let mut successor: Vec<Option<usize>> = vec![None; n];
     for (i, rename) in renames.iter().enumerate() {
-        if let Some(&j) = target_to_idx.get(&keys[rename.source.as_ref().as_os_str()]) {
+        if let Some(&j) = target_to_idx.get(rename.source.key()) {
             // Spelling-only operations can refer to their own entry.
             if i == j {
                 continue;
@@ -420,7 +407,7 @@ where
         // graph decomposes into disjoint simple cycles — walk each one by
         // following `successor` until we come back to the start.
         let mut visited = vec![false; n];
-        let mut cycles: Vec<Vec<PathBuf>> = Vec::new();
+        let mut cycles = Vec::new();
         for start in 0..n {
             if visited[start] || indegree[start] == 0 {
                 continue;
@@ -429,7 +416,7 @@ where
             let mut i = start;
             loop {
                 visited[i] = true;
-                cycle.push(renames[i].target.as_ref().to_path_buf());
+                cycle.push(i);
                 i = successor[i].expect("nodes left after Kahn's algorithm have a successor");
                 if i == start {
                     break;
@@ -493,7 +480,10 @@ mod tests {
             .prepare()
             .into_plan()
             .unwrap();
-        let order: Vec<_> = plan.renames.iter().map(|r| (r.source, r.target)).collect();
+        let order: Vec<_> = plan
+            .iter()
+            .map(|r| (*r.source.original, *r.target.original))
+            .collect();
         assert_eq!(order, [("b", "c"), ("a", "b")]);
     }
 

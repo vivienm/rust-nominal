@@ -56,6 +56,16 @@ so it can be propagated with `?` even when the input paths were borrowed. Its
 needed after preparation. `apply()` stops at the first error; `apply_iter()` lets
 the caller continue with independent operations.
 
+`Plan::iter()` yields views of the retained operations in execution order for
+inspection or custom output. For `Plan<S, T>`, each view is a
+`Rename<PlannedPath<'_, S>, PlannedPath<'_, T>>`. Each endpoint exposes `original`
+(a reference to the input value, including its metadata) and `resolved` (the
+captured execution path). Its `AsRef<Path>` uses `resolved`, so displaying the
+view shows the paths the plan will use, even if interior mutability changes the
+originals. `Plan::write_to()` and `write_colored_to()` also use these captured
+paths. Creating views does not allocate or clone paths, execute renames, or
+consume the plan.
+
 ## Filesystem guarantees
 
 - System renames atomically refuse destination replacement on Linux, Android,

@@ -122,7 +122,7 @@ impl fmt::Display for PreparationError {
 
 impl Error for PreparationError {}
 
-type Partition<S, T> = (Vec<Rename<S, T>>, Vec<Rejection<S, T>>);
+type Partition<R, S, T> = (Vec<R>, Vec<Rejection<S, T>>);
 
 /// Assign each operation its first diagnostic while still detecting later
 /// conflicts against the entire batch. This prevents an arbitrary survivor
@@ -160,7 +160,13 @@ impl RejectionTracker {
         }
     }
 
-    pub(crate) fn partition<S, T>(self, renames: Vec<Rename<S, T>>) -> Partition<S, T> {
+    /// Retain each operation's internal state, extracting its original values
+    /// only when it is rejected.
+    pub(crate) fn partition<R, S, T>(
+        self,
+        renames: Vec<R>,
+        mut into_original: impl FnMut(R) -> Rename<S, T>,
+    ) -> Partition<R, S, T> {
         let mut groups: Vec<_> = self
             .reasons
             .into_iter()
@@ -172,7 +178,7 @@ impl RejectionTracker {
         let mut retained = Vec::new();
         for (rename, owner) in renames.into_iter().zip(self.owners) {
             if let Some(group) = owner {
-                groups[group].renames.push(rename);
+                groups[group].renames.push(into_original(rename));
             } else {
                 retained.push(rename);
             }

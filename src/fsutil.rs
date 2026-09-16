@@ -10,32 +10,56 @@ pub fn common_ancestor<'a>(path_1: &'a Path, path_2: &'a Path) -> Option<&'a Pat
         .find(|&ancestor| !ancestor.as_os_str().is_empty() && path_2.starts_with(ancestor))
 }
 
-/// Resolves parent aliases without following the final directory entry.
-/// Missing parent directories are permitted so apply can create them later.
-pub(crate) fn entry_path(path: &Path) -> io::Result<PathBuf> {
-    let name = path.file_name().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path must name a directory entry",
-        )
-    })?;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut resolved = resolve_directory(parent)?.join(name);
-    // Path components omit trailing separators and `.`. Preserve these in the
-    // executed path: `file/` must not silently become a valid rename of `file`.
-    let raw = path.as_os_str().as_encoded_bytes();
-    let final_component = raw
-        .rsplit(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
-        .find(|component| !component.is_empty());
-    if final_component == Some(b".") {
-        resolved.push(".");
-    } else if raw.ends_with(b"/") || (cfg!(windows) && raw.ends_with(b"\\")) {
-        resolved.push("");
+/// A path whose parents have been resolved, preserving the final entry spelling.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPath(PathBuf);
+
+impl ResolvedPath {
+    /// Resolves parent aliases by inspecting the filesystem, without following
+    /// the final directory entry. Missing parent directories are permitted so
+    /// apply can create them later; trailing separators and `.` are preserved.
+    pub(crate) fn new(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let name = path.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path must name a directory entry",
+            )
+        })?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut resolved = resolve_directory(parent)?.join(name);
+        // Path components omit trailing separators and `.`. Preserve these in the
+        // executed path: `file/` must not silently become a valid rename of `file`.
+        let raw = path.as_os_str().as_encoded_bytes();
+        let final_component = raw
+            .rsplit(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
+            .find(|component| !component.is_empty());
+        if final_component == Some(b".") {
+            resolved.push(".");
+        } else if raw.ends_with(b"/") || (cfg!(windows) && raw.ends_with(b"\\")) {
+            resolved.push("");
+        }
+        Ok(Self(resolved))
     }
-    Ok(resolved)
+
+    pub(crate) fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ResolvedPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+impl From<ResolvedPath> for PathBuf {
+    fn from(path: ResolvedPath) -> Self {
+        path.0
+    }
 }
 
 fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
@@ -76,6 +100,53 @@ fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
         resolved.push(name);
     }
     Ok(resolved)
+}
+
+/// A resolved execution path paired with its preparation-time entry identity.
+/// Private fields prevent constructing mismatched paths and keys.
+#[derive(Debug, Clone)]
+pub(crate) struct IdentifiedPath {
+    resolved: ResolvedPath,
+    key: EntryKey,
+}
+
+impl IdentifiedPath {
+    pub(crate) fn new(mut resolved: ResolvedPath) -> Result<Self, IdentificationError> {
+        match entry_key(resolved.as_path()) {
+            Ok(key) => {
+                resolved.0.shrink_to_fit();
+                Ok(Self { resolved, key })
+            }
+            Err(source) => Err(IdentificationError { resolved, source }),
+        }
+    }
+
+    pub(crate) fn as_path(&self) -> &Path {
+        self.resolved.as_path()
+    }
+
+    pub(crate) fn key(&self) -> &EntryKey {
+        &self.key
+    }
+
+    pub(crate) fn into_resolved(self) -> ResolvedPath {
+        self.resolved
+    }
+}
+
+impl AsRef<Path> for IdentifiedPath {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+
+/// An identification failure retaining the resolved path for overlap checks.
+#[derive(Debug, thiserror::Error)]
+#[error("{source}")]
+pub(crate) struct IdentificationError {
+    pub(crate) resolved: ResolvedPath,
+    #[source]
+    pub(crate) source: io::Error,
 }
 
 /// The on-disk anchor and unresolved suffix of a directory entry.

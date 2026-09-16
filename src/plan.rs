@@ -1,14 +1,8 @@
-use std::{
-    collections::{HashMap, HashSet},
-    ffi::OsString,
-    io,
-    path::{Path, PathBuf},
-    vec,
-};
+use std::{collections::HashSet, io, path::Path, vec};
 
 use crate::{
     error::{ApplyError, FsError},
-    fsutil::{EntryKey, target_conflicts},
+    fsutil::{EntryKey, IdentifiedPath, target_conflicts},
     operation::Rename,
     preparation::{Rejection, RejectionTracker},
 };
@@ -17,9 +11,85 @@ use crate::{
 #[derive(Debug)]
 #[must_use]
 pub struct Plan<S, T> {
-    pub(crate) renames: Vec<Rename<S, T>>,
-    pub(crate) paths: HashMap<OsString, PathBuf>,
-    pub(crate) keys: HashMap<OsString, EntryKey>,
+    pub(crate) renames: Vec<PreparedRename<S, T>>,
+}
+
+/// A borrowed view of a planned endpoint and its original value.
+///
+/// [`AsRef<Path>`] returns the captured [`Self::resolved`] path, which is used
+/// for execution and conflict checks even if the original value changes through
+/// interior mutability. Copying this view neither allocates nor clones its data.
+#[derive(Debug)]
+pub struct PlannedPath<'a, P: ?Sized> {
+    /// The original value supplied to [`crate::Renamer`], including any metadata.
+    pub original: &'a P,
+    /// The execution path captured during preparation.
+    pub resolved: &'a Path,
+}
+
+impl<P: ?Sized> Copy for PlannedPath<'_, P> {}
+
+impl<P: ?Sized> Clone for PlannedPath<'_, P> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<P: ?Sized> AsRef<Path> for PlannedPath<'_, P> {
+    fn as_ref(&self) -> &Path {
+        self.resolved
+    }
+}
+
+/// An operation whose endpoints have both passed path resolution.
+/// Keep execution paths and dependency identities attached when reordering or
+/// rejecting operations; original values remain available for sorting, inspection
+/// and results.
+pub(crate) type PreparedRename<S, T> = Rename<PreparedPath<S>, PreparedPath<T>>;
+
+/// The execution spelling and preparation-time identity of one endpoint.
+#[derive(Debug)]
+pub(crate) struct PreparedPath<P> {
+    pub(crate) original: P,
+    identified: IdentifiedPath,
+}
+
+impl<P> PreparedPath<P> {
+    pub(crate) fn new(original: P, identified: IdentifiedPath) -> Self {
+        Self {
+            original,
+            identified,
+        }
+    }
+
+    pub(crate) fn key(&self) -> &EntryKey {
+        self.identified.key()
+    }
+
+    fn resolved(&self) -> &Path {
+        self.identified.as_path()
+    }
+
+    fn view(&self) -> PlannedPath<'_, P> {
+        PlannedPath {
+            original: &self.original,
+            resolved: self.resolved(),
+        }
+    }
+}
+
+impl<S, T> PreparedRename<S, T> {
+    fn view(&self) -> Rename<PlannedPath<'_, S>, PlannedPath<'_, T>> {
+        Rename::new(self.source.view(), self.target.view())
+    }
+
+    pub(crate) fn into_original(self) -> Rename<S, T> {
+        Rename::new(self.source.original, self.target.original)
+    }
+
+    fn resolved(&self) -> Rename<&Path, &Path> {
+        Rename::new(self.source.resolved(), self.target.resolved())
+    }
 }
 
 impl<S, T> Plan<S, T> {
@@ -53,25 +123,49 @@ impl<S, T> Plan<S, T> {
     pub fn len(&self) -> usize {
         self.renames.len()
     }
-}
 
-impl<S, T> Plan<S, T>
-where
-    S: AsRef<Path>,
-    T: AsRef<Path>,
-{
-    /// Writes the plan to the specified writer.
+    /// Yields borrowed views of the retained operations in execution order.
+    ///
+    /// Each view is a [`Rename`] of two [`PlannedPath`] values, exposing both the
+    /// original values supplied to [`crate::Renamer`] and the captured execution
+    /// paths. Creating views neither allocates nor clones those values.
+    /// Iteration neither consumes the plan nor inspects or modifies the filesystem.
+    /// Execution and conflict checks use the paths captured during preparation,
+    /// even if interior mutability changes the original values exposed here.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use nominal::Renamer;
+    /// # let dir = tempfile::tempdir()?;
+    /// let plan = Renamer::from_iter([(dir.path().join("old"), dir.path().join("new"))])
+    ///     .prepare()
+    ///     .into_plan()?;
+    /// for rename in plan.iter() {
+    ///     println!("{rename}"); // Displays the captured paths.
+    /// }
+    /// assert_eq!(plan.len(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = Rename<PlannedPath<'_, S>, PlannedPath<'_, T>>>
+    + DoubleEndedIterator {
+        self.renames.iter().map(PreparedRename::view)
+    }
+
+    /// Writes the plan's captured execution paths to the specified writer.
     pub fn write_to<W>(&self, writer: &mut W) -> io::Result<()>
     where
         W: io::Write,
     {
-        for rename in &self.renames {
+        for rename in self.iter() {
             rename.write_to(writer)?;
         }
         Ok(())
     }
 
-    /// Writes the plan to the specified writer, with ANSI colors.
+    /// Writes the plan's captured execution paths to the specified writer, with ANSI colors.
     ///
     /// To color paths using the `LS_COLORS` environment variable:
     ///
@@ -88,7 +182,7 @@ where
     where
         W: io::Write,
     {
-        for rename in &self.renames {
+        for rename in self.iter() {
             rename.write_colored_to(writer, ls_colors)?;
         }
         Ok(())
@@ -146,34 +240,36 @@ where
         let mut vacated: HashSet<&EntryKey> = HashSet::with_capacity(self.renames.len());
         let mut rejected = RejectionTracker::new(self.renames.len());
         for (index, rename) in self.renames.iter().enumerate() {
-            let source = self.paths[rename.source.as_ref().as_os_str()].as_path();
-            let target = self.paths[rename.target.as_ref().as_os_str()].as_path();
-            let conflict = if vacated.contains(&self.keys[rename.target.as_ref().as_os_str()]) {
+            let resolved = rename.resolved();
+            let conflict = if vacated.contains(rename.target.key()) {
                 Ok(false)
             } else {
-                target_conflicts(source, target)
+                target_conflicts(resolved.source, resolved.target)
             };
             match conflict {
                 Ok(false) => {
-                    vacated.insert(&self.keys[rename.source.as_ref().as_os_str()]);
+                    vacated.insert(rename.source.key());
                 }
                 Ok(true) => rejected.mark(
                     [index],
                     FsError::TargetExists {
-                        target_path: rename.target.as_ref().to_path_buf(),
+                        target_path: resolved.target.to_path_buf(),
                     },
                 ),
                 Err(source) => rejected.mark(
                     [index],
                     FsError::Inspect {
-                        source_path: rename.source.as_ref().to_path_buf(),
-                        target_path: rename.target.as_ref().to_path_buf(),
+                        source_path: resolved.source.to_path_buf(),
+                        target_path: resolved.target.to_path_buf(),
                         source,
                     },
                 ),
             }
         }
-        let (retained, rejections) = rejected.partition(std::mem::take(&mut self.renames));
+        let (retained, rejections) = rejected.partition(
+            std::mem::take(&mut self.renames),
+            PreparedRename::into_original,
+        );
         self.renames = retained;
         rejections
     }
@@ -268,7 +364,6 @@ where
     pub fn apply_iter(self) -> ApplyIter<S, T> {
         ApplyIter {
             iter: self.renames.into_iter(),
-            paths: self.paths,
         }
     }
 }
@@ -280,28 +375,20 @@ where
 #[derive(Debug)]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct ApplyIter<S, T> {
-    iter: vec::IntoIter<Rename<S, T>>,
-    paths: HashMap<OsString, PathBuf>,
+    iter: vec::IntoIter<PreparedRename<S, T>>,
 }
 
-impl<S, T> Iterator for ApplyIter<S, T>
-where
-    S: AsRef<Path>,
-    T: AsRef<Path>,
-{
+impl<S, T> Iterator for ApplyIter<S, T> {
     type Item = Result<Rename<S, T>, ApplyError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let rename = self.iter.next()?;
-        let resolved = Rename::new(
-            &self.paths[rename.source.as_ref().as_os_str()],
-            &self.paths[rename.target.as_ref().as_os_str()],
-        );
+        let resolved = rename.resolved();
         Some(match resolved.apply() {
-            Ok(()) => Ok(rename),
+            Ok(()) => Ok(rename.into_original()),
             Err(source) => Err(ApplyError {
-                source_path: rename.source.as_ref().to_path_buf(),
-                target_path: rename.target.as_ref().to_path_buf(),
+                source_path: rename.source.identified.into_resolved().into(),
+                target_path: rename.target.identified.into_resolved().into(),
                 source,
             }),
         })
@@ -312,12 +399,7 @@ where
     }
 }
 
-impl<S, T> ExactSizeIterator for ApplyIter<S, T>
-where
-    S: AsRef<Path>,
-    T: AsRef<Path>,
-{
-}
+impl<S, T> ExactSizeIterator for ApplyIter<S, T> {}
 
 #[cfg(test)]
 mod tests {
@@ -326,9 +408,43 @@ mod tests {
     use crate::Renamer;
 
     #[test]
+    fn execution_paths_resolve_aliases_and_preserve_original_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let source = root.join("source");
+        let target = root.join("./target");
+        std::fs::write(&source, "contents").unwrap();
+        // Exercise an owned source and a borrowed target in the same operation.
+        let mut plan = Renamer::from_iter([(source, &target)])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        let rename = &plan.renames[0];
+        let resolved = rename.resolved();
+        assert_eq!(
+            resolved.source.as_os_str(),
+            rename.source.original.as_os_str()
+        );
+        assert_eq!(resolved.target.as_os_str(), root.join("target").as_os_str());
+        assert_ne!(resolved.target.as_os_str(), target.as_os_str());
+        assert!(std::ptr::eq(
+            *plan.iter().next().unwrap().target.original,
+            &target
+        ));
+
+        assert!(plan.reject_conflicts().is_empty());
+        plan.apply().unwrap();
+        assert!(!root.join("source").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("target")).unwrap(),
+            "contents"
+        );
+    }
+
+    #[test]
     fn apply_reports_failure_path() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let dir = temp_dir.path();
+        let dir = temp_dir.path().canonicalize().unwrap();
 
         // First rename succeeds, second collides with a pre-existing target.
         File::create(dir.join("a")).unwrap();
@@ -348,7 +464,7 @@ mod tests {
     #[test]
     fn preparation_reports_pre_existing_target() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let dir = temp_dir.path();
+        let dir = temp_dir.path().canonicalize().unwrap();
 
         File::create(dir.join("a")).unwrap();
         File::create(dir.join("b")).unwrap(); // collides
@@ -411,7 +527,7 @@ mod tests {
     #[test]
     fn apply_iter_continues_past_failures() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let dir = temp_dir.path();
+        let dir = temp_dir.path().canonicalize().unwrap();
 
         // Middle rename collides with a pre-existing target; the others go
         // through. Best-effort iteration should yield Ok / Err / Ok in order.
