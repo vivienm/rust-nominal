@@ -100,4 +100,9 @@ filesystem checks, and `PreparationError` owns all rejected paths. The former
 `FsConflict` diagnostics are now `FsError`, including inspection I/O errors.
 Use `reject_conflicts()` only when an existing plan needs to be checked again.
 
+`Error` has two variants: `Preparation` and `Apply`. The former `Error::Plan`
+and `Error::Filesystem` variants and their `From` conversions have been removed.
+Inspect `PreparationError::rejections` and `RejectionReason` for the individual
+`PlanError` and `FsError` diagnostics.
+
 [API documentation](https://vivienm.github.io/rust-nominal/docs/nominal/)

@@ -2,17 +2,16 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-/// The general error type for this crate.
+/// An error from strict preparation or plan application.
+///
+/// Planning and filesystem diagnostics are carried by the rejections in
+/// [`crate::PreparationError`], rather than returned directly as this error.
 #[derive(Debug, Error)]
 #[error(transparent)]
 #[non_exhaustive]
 pub enum Error {
     /// Rejections from strict preparation.
     Preparation(#[from] crate::PreparationError),
-    /// A plan error.
-    Plan(#[from] PlanError),
-    /// A filesystem inspection error.
-    Filesystem(#[from] FsError),
     /// An apply error.
     Apply(#[from] ApplyError),
 }
