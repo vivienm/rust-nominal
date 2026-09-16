@@ -11,7 +11,10 @@ use std::{
 
 use crate::{
     PlanError, Rename,
-    fsutil::{EntryKey, IdentificationError, IdentifiedPath, ResolvedPath, resolve_directory},
+    fsutil::{
+        EntryKey, IdentificationError, IdentifiedPath, ResolvedPath, ends_with_entry_name,
+        entry_key, entry_parent, resolve_directory,
+    },
     plan::{PreparedPath, PreparedRename},
     preparation::Rejection,
 };
@@ -57,7 +60,16 @@ pub(crate) struct ResolutionCache {
     // Cache successful parent resolutions by spelling, without simplifying `..`
     // or merging suffix constraints. Discard them before identification, so
     // later preparations and execution always inspect the filesystem afresh.
-    parents: HashMap<OsString, PathBuf>,
+    parents: HashMap<OsString, CachedParent>,
+}
+
+struct CachedParent {
+    resolved: PathBuf,
+    // Canonical paths on Unix may retain case aliases of a directory. Inspect
+    // its identity only when equal entry names could be a no-op, storing it
+    // alongside the resolved path rather than duplicating that path as a key.
+    // Allocate on demand to keep unused identities out of every map bucket.
+    key: Option<Box<EntryKey>>,
 }
 
 impl ResolutionCache {
@@ -74,21 +86,59 @@ impl ResolutionCache {
                 if !self.parents.contains_key(parent.as_os_str()) {
                     self.parents.insert(
                         parent.as_os_str().to_os_string(),
-                        resolve_directory(parent)?,
+                        CachedParent {
+                            resolved: resolve_directory(parent)?,
+                            key: None,
+                        },
                     );
                 }
-                Ok(self.parents[parent.as_os_str()].as_path())
+                Ok(self.parents[parent.as_os_str()].resolved.as_path())
             });
             self.entries
                 .insert(path.as_os_str().to_os_string(), resolved);
         }
     }
 
-    pub(crate) fn resolved(&self, path: &Path) -> Option<&Path> {
-        self.entries
-            .get(path.as_os_str())
-            .and_then(|result| result.as_ref().ok())
-            .map(ResolvedPath::as_path)
+    pub(crate) fn is_noop(&mut self, source: &Path, target: &Path) -> bool {
+        let resolved = |path: &Path| {
+            self.entries
+                .get(path.as_os_str())
+                .and_then(|result| result.as_ref().ok())
+                .map(ResolvedPath::as_path)
+        };
+        let (Some(resolved_source), Some(resolved_target)) = (resolved(source), resolved(target))
+        else {
+            return false;
+        };
+        if resolved_source.as_os_str() == resolved_target.as_os_str() {
+            return true;
+        }
+        // Preserve actual spelling changes of the final entry and all suffix
+        // constraints. Only the parent is allowed to have a different spelling.
+        if resolved_source.file_name() != resolved_target.file_name()
+            || !ends_with_entry_name(resolved_source)
+            || !ends_with_entry_name(resolved_target)
+        {
+            return false;
+        }
+        // The parent table is indexed by the original spelling, not by the
+        // canonical path. Use precisely the same parent rule as resolution.
+        let source_parent = entry_parent(source).as_os_str();
+        let target_parent = entry_parent(target).as_os_str();
+        for parent in [source_parent, target_parent] {
+            let parent = self
+                .parents
+                .get_mut(parent)
+                .expect("resolved parent is cached");
+            if parent.key.is_none() {
+                let Ok(key) = entry_key(&parent.resolved) else {
+                    // An unproven alias must continue through normal validation.
+                    return false;
+                };
+                parent.key = Some(Box::new(key));
+            }
+        }
+        self.parents[source_parent].key == self.parents[target_parent].key
     }
 
     /// Consume resolution results before sharing entry identities.

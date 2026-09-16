@@ -122,6 +122,8 @@ Run `cargo bench --bench preparation --all-features` to measure batches of
 - Shared parents with twenty books per author, using ordered or reproducibly
   shuffled inputs and existing or missing destination directories.
 - Dispersed parents, with a separate source and destination directory per file.
+- Shared and dispersed parents with unchanged filenames, exercising lazy
+  parent identity caching during no-op detection.
 - Duplicate targets and overlapping sources (20% of operations rejected),
   occupied targets (10% rejected), and a shuffled dependency chain.
 - A shared duplicate source with many overlapping descendants (all rejected),

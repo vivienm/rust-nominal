@@ -10,6 +10,26 @@ pub fn common_ancestor<'a>(path_1: &'a Path, path_2: &'a Path) -> Option<&'a Pat
         .find(|&ancestor| !ancestor.as_os_str().is_empty() && path_2.starts_with(ancestor))
 }
 
+/// Whether the raw path ends directly with its entry name.
+/// `file_name()` ignores trailing separators and `.` components, so compare
+/// against the raw spelling: `dir` passes, but `dir/` and `dir/.` do not.
+/// This prevents same-entry no-op detection from bypassing the filesystem
+/// checks required by those suffixes.
+pub(crate) fn ends_with_entry_name(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| {
+        path.as_os_str()
+            .as_encoded_bytes()
+            .ends_with(name.as_encoded_bytes())
+    })
+}
+
+/// The parent spelling used for resolution and its preparation-local cache.
+pub(crate) fn entry_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
 /// A path whose parents have been resolved, preserving the final entry spelling.
 /// This captures a spelling, not an open handle: directories can still change
 /// before execution, and filesystem operations will observe their current state.
@@ -35,10 +55,7 @@ impl ResolvedPath {
                 "path must name a directory entry",
             )
         })?;
-        let parent = path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
+        let parent = entry_parent(path);
         let mut resolved = resolve_parent(parent)?.as_ref().join(name);
         // Path components omit trailing separators and `.`. Preserve these in the
         // executed path: `file/` must not silently become a valid rename of `file`.

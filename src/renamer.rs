@@ -90,6 +90,8 @@ where
     /// missing parent directories are allowed. The final component is kept
     /// unchanged so symlinks themselves can be renamed. Original paths are
     /// preserved for inspection and results; plan output uses the captured paths.
+    /// Parent case aliases with an unchanged entry name are no-ops too;
+    /// changes to the spelling of the entry name itself are retained.
     ///
     /// Paths are not confined to a library or working directory: absolute
     /// destinations and `..` in existing parent directories are supported.
@@ -121,11 +123,7 @@ where
             // Failures remain in the cache for the identification phase.
             cache.resolve(rename.source.as_ref());
             cache.resolve(rename.target.as_ref());
-            if let (Some(source), Some(target)) = (
-                cache.resolved(rename.source.as_ref()),
-                cache.resolved(rename.target.as_ref()),
-            ) && source.as_os_str() == target.as_os_str()
-            {
+            if cache.is_noop(rename.source.as_ref(), rename.target.as_ref()) {
                 continue;
             }
             renames.push(rename);

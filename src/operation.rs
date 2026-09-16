@@ -2,7 +2,7 @@ use std::{fmt, fs, path::Path};
 
 use crate::{
     error::RenameError,
-    fsutil::{ResolvedPath, TargetState, common_ancestor, target_state},
+    fsutil::{ResolvedPath, TargetState, common_ancestor, ends_with_entry_name, target_state},
 };
 
 /// A rename operation.
@@ -154,19 +154,6 @@ fn rename_to_free_target(source: &Path, target: &Path) -> Result<(), RenameError
     }
     tracing::debug!("renaming {} to {}", source.display(), target.display());
     crate::noreplace::rename(source, target)
-}
-
-/// Whether the raw path ends directly with its entry name.
-/// `file_name()` ignores trailing separators and `.` components, so compare
-/// against the raw spelling: `dir` passes, but `dir/` and `dir/.` do not.
-/// This prevents same-entry no-op detection from bypassing the filesystem
-/// checks required by those suffixes.
-fn ends_with_entry_name(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| {
-        path.as_os_str()
-            .as_encoded_bytes()
-            .ends_with(name.as_encoded_bytes())
-    })
 }
 
 fn rename_via_temporary(

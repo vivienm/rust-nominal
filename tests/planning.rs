@@ -341,6 +341,60 @@ fn sibling_destinations_and_independent_directory_moves_remain_supported() {
 }
 
 #[test]
+fn equal_entry_names_in_distinct_parents_are_not_noops() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name: &str| dir.path().join(name);
+    fs::create_dir(p("first")).unwrap();
+    fs::create_dir(p("second")).unwrap();
+    fs::write(p("first/file"), "contents").unwrap();
+    fs::hard_link(p("first/file"), p("second/file")).unwrap();
+    assert!(
+        Renamer::from_iter([(p("first/file"), p("second/file"))])
+            .prepare()
+            .into_plan()
+            .is_err()
+    );
+    fs::remove_file(p("second/file")).unwrap();
+    let plan = Renamer::from_iter([(p("first/file"), p("second/file"))])
+        .prepare()
+        .into_plan()
+        .unwrap();
+    assert_eq!(plan.len(), 1);
+    plan.apply().unwrap();
+    assert!(!p("first/file").exists());
+    assert_eq!(fs::read_to_string(p("second/file")).unwrap(), "contents");
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_identities_are_cached_under_the_original_alias_spellings() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |name: &str| dir.path().join(name);
+    fs::create_dir(p("source")).unwrap();
+    fs::create_dir(p("target")).unwrap();
+    std::os::unix::fs::symlink("source", p("source-alias")).unwrap();
+    std::os::unix::fs::symlink("target", p("target-alias")).unwrap();
+    let mut pairs = Vec::new();
+    for name in ["first", "second"] {
+        fs::write(p(&format!("source/{name}")), name).unwrap();
+        pairs.push((
+            p(&format!("source-alias/{name}")),
+            p(&format!("target-alias/new/{name}")),
+        ));
+    }
+    let plan = Renamer::from_iter(pairs).prepare().into_plan().unwrap();
+    assert_eq!(plan.len(), 2);
+    plan.apply().unwrap();
+    for name in ["first", "second"] {
+        assert!(!p(&format!("source/{name}")).exists());
+        assert_eq!(
+            fs::read_to_string(p(&format!("target/new/{name}"))).unwrap(),
+            name
+        );
+    }
+}
+
+#[test]
 fn relative_paths_are_anchored_at_planning_time() {
     const CHILD: &str = "NOMINAL_PLANNING_CWD_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -358,7 +412,17 @@ fn relative_paths_are_anchored_at_planning_time() {
     let base = std::env::current_dir().unwrap();
     fs::write("a", "A").unwrap();
     fs::write("b", "B").unwrap();
+    fs::write("same-name", "same name").unwrap();
     fs::create_dir("other").unwrap();
+    // A bare filename uses the cached parent spelling ".". The destination
+    // also exercises lazy identity lookup for a missing parent directory.
+    let same_name = Renamer::from_iter([(
+        std::path::PathBuf::from("same-name"),
+        base.join("destination/same-name"),
+    )])
+    .prepare()
+    .into_plan()
+    .unwrap();
     let mut plan = Renamer::from_iter([
         (std::path::PathBuf::from("a"), base.join("b")),
         (std::path::PathBuf::from("./b"), base.join("c")),
@@ -374,6 +438,12 @@ fn relative_paths_are_anchored_at_planning_time() {
     assert_eq!(fs::read_to_string(base.join("c")).unwrap(), "B");
     assert!(!base.join("a").exists());
     assert_eq!(fs::read_dir(".").unwrap().count(), 0);
+    same_name.apply().unwrap();
+    assert!(!base.join("same-name").exists());
+    assert_eq!(
+        fs::read_to_string(base.join("destination/same-name")).unwrap(),
+        "same name"
+    );
 }
 
 #[cfg(unix)]

@@ -214,6 +214,85 @@ fn case_alias_parents_do_not_create_false_conflicts() {
 }
 
 #[test]
+fn parent_case_alias_noops_do_not_reject_real_moves() {
+    for reverse in [false, true] {
+        let Some(dir) = case_insensitive_dir() else {
+            return;
+        };
+        let p = |name: &str| dir.path().join(name);
+        fs::create_dir(p("folder")).unwrap();
+        fs::write(p("folder/file"), "data").unwrap();
+        // Sharing an inode with a distinct entry must not prevent recognizing
+        // the no-op: only the identity of the parent and the entry name matter.
+        fs::hard_link(p("folder/file"), p("hard-link")).unwrap();
+        let mut pairs = [
+            (p("folder/file"), p("FOLDER/file")),
+            (p("folder/file"), p("moved")),
+        ];
+        if reverse {
+            pairs.reverse();
+        }
+        let plan = Renamer::from_iter(pairs).prepare().into_plan().unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan.iter().next().unwrap().target.original, &p("moved"));
+        plan.apply().unwrap();
+        assert!(!p("folder/file").exists());
+        assert_eq!(fs::read_to_string(p("moved")).unwrap(), "data");
+        assert_eq!(fs::read_to_string(p("hard-link")).unwrap(), "data");
+    }
+}
+
+#[test]
+fn parent_case_alias_noop_does_not_vacate_an_occupied_target() {
+    let Some(dir) = case_insensitive_dir() else {
+        return;
+    };
+    let p = |name: &str| dir.path().join(name);
+    fs::create_dir(p("folder")).unwrap();
+    fs::write(p("folder/file"), "existing").unwrap();
+    fs::write(p("incoming"), "incoming").unwrap();
+    let (plan, rejections) = Renamer::from_iter([
+        (p("folder/file"), p("FOLDER/file")),
+        (p("incoming"), p("folder/file")),
+    ])
+    .prepare()
+    .into_parts();
+    assert!(plan.is_empty());
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0].renames.len(), 1);
+    assert_eq!(rejections[0].renames[0].source, p("incoming"));
+    assert!(matches!(
+        &rejections[0].reason,
+        nominal::RejectionReason::Filesystem(nominal::FsError::TargetExists { .. })
+    ));
+    assert_eq!(fs::read_to_string(p("folder/file")).unwrap(), "existing");
+    assert_eq!(fs::read_to_string(p("incoming")).unwrap(), "incoming");
+}
+
+#[cfg(unix)]
+#[test]
+fn parent_case_alias_noops_preserve_suffix_constraints() {
+    for (source, target) in [
+        ("folder/child", "FOLDER/child/."),
+        ("folder/child/.", "FOLDER/child"),
+    ] {
+        let Some(dir) = case_insensitive_dir() else {
+            return;
+        };
+        let p = |name: &str| dir.path().join(name);
+        fs::create_dir_all(p("folder/child")).unwrap();
+        fs::write(p("folder/child/file"), "data").unwrap();
+        let plan = Renamer::from_iter([(p(source), p(target))])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        assert_eq!(plan.len(), 1);
+        assert!(plan.apply().is_err());
+        assert_eq!(fs::read_to_string(p("folder/child/file")).unwrap(), "data");
+    }
+}
+
+#[test]
 fn case_only_directory_rename_preserves_contents_and_spelling() {
     let Some(dir) = case_insensitive_dir() else {
         return;

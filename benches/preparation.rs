@@ -14,8 +14,10 @@ enum Scenario {
     SharedOrdered,
     SharedShuffled,
     SharedMissing,
+    SharedSameName,
     DispersedExisting,
     DispersedMissing,
+    DispersedSameName,
     DuplicateTargets,
     OccupiedTargets,
     OverlappingSources,
@@ -29,8 +31,10 @@ impl Scenario {
             Self::SharedOrdered => "shared/existing/ordered",
             Self::SharedShuffled => "shared/existing/shuffled",
             Self::SharedMissing => "shared/missing/shuffled",
+            Self::SharedSameName => "shared/same-name/shuffled",
             Self::DispersedExisting => "dispersed/existing/shuffled",
             Self::DispersedMissing => "dispersed/missing/shuffled",
+            Self::DispersedSameName => "dispersed/same-name/shuffled",
             Self::DuplicateTargets => "duplicate-targets/shuffled",
             Self::OccupiedTargets => "occupied-targets/shuffled",
             Self::OverlappingSources => "overlapping-sources/shuffled",
@@ -112,7 +116,7 @@ impl Fixture {
         }
         let dispersed = matches!(
             scenario,
-            Scenario::DispersedExisting | Scenario::DispersedMissing
+            Scenario::DispersedExisting | Scenario::DispersedMissing | Scenario::DispersedSameName
         );
         let missing = matches!(
             scenario,
@@ -158,7 +162,14 @@ impl Fixture {
                     } else {
                         book
                     };
-                parent.join(format!("Book {target_book:05}.epub"))
+                if matches!(
+                    scenario,
+                    Scenario::SharedSameName | Scenario::DispersedSameName
+                ) {
+                    parent.join(source.file_name().unwrap())
+                } else {
+                    parent.join(format!("Book {target_book:05}.epub"))
+                }
             };
             if matches!(scenario, Scenario::OccupiedTargets) && book % 10 == 0 {
                 fs::write(&target, []).unwrap();
@@ -229,8 +240,10 @@ fn main() {
             Scenario::SharedOrdered,
             Scenario::SharedShuffled,
             Scenario::SharedMissing,
+            Scenario::SharedSameName,
             Scenario::DispersedExisting,
             Scenario::DispersedMissing,
+            Scenario::DispersedSameName,
             Scenario::DuplicateTargets,
             Scenario::OccupiedTargets,
             Scenario::OverlappingSources,
