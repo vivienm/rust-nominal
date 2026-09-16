@@ -124,6 +124,8 @@ Run `cargo bench --bench preparation --all-features` to measure batches of
 - Dispersed parents, with a separate source and destination directory per file.
 - Duplicate targets and overlapping sources (20% of operations rejected),
   occupied targets (10% rejected), and a shuffled dependency chain.
+- A shared duplicate source with many overlapping descendants (all rejected),
+  exercising intersecting duplicate and overlap groups.
 
 Every sample checks the retained count and the number and kind of rejections.
 The benchmark reports seven samples after a warm-up, excluding fixture setup,

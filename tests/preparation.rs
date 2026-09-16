@@ -221,6 +221,54 @@ fn overlaps_reject_all_affected_operations_but_keep_siblings() {
 }
 
 #[test]
+fn duplicate_ancestor_groups_reject_every_descendant_without_double_counting() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name: &str| dir.path().join(name);
+        fs::create_dir(p("folder")).unwrap();
+        fs::create_dir(p("alias-parent")).unwrap();
+        let mut pairs = Vec::new();
+        for index in 0..64 {
+            let child = p(&format!("folder/file-{index}"));
+            fs::write(&child, "child").unwrap();
+            // Alternate resolved spellings of the same ancestor.
+            let ancestor = if index % 2 == 0 {
+                p("folder")
+            } else {
+                p("alias-parent/../folder")
+            };
+            pairs.push((ancestor, p(&format!("moved-{index}"))));
+            pairs.push((child, p(&format!("file-{index}"))));
+        }
+        if reverse {
+            pairs.reverse();
+        }
+        fs::write(p("independent"), "keep").unwrap();
+        pairs.push((p("independent"), p("done")));
+        let (plan, rejections) = Renamer::from_iter(pairs).prepare().into_parts();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            rejections.iter().map(|r| r.renames.len()).sum::<usize>(),
+            128
+        );
+        assert_eq!(rejections[0].renames.len(), 64);
+        assert!(matches!(
+            &rejections[0].reason,
+            RejectionReason::Plan(PlanError::DuplicateSource { .. })
+        ));
+        for rejection in &rejections[1..] {
+            assert_eq!(rejection.renames.len(), 1);
+            assert!(matches!(&rejection.reason,
+                RejectionReason::Plan(PlanError::OverlappingPaths { descendant_path, .. })
+                    if descendant_path == &rejection.renames[0].source));
+        }
+        plan.apply().unwrap();
+        assert_eq!(fs::read_to_string(p("done")).unwrap(), "keep");
+        assert_eq!(fs::read_dir(p("folder")).unwrap().count(), 64);
+    }
+}
+
+#[test]
 fn resolution_errors_do_not_hide_duplicates_or_overlaps() {
     // Exercise both parent resolution and final-entry identification failures.
     for bad in ["missing/../bad", "bad\0"] {

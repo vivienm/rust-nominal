@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque, hash_map::Entry},
+    collections::{HashMap, HashSet, VecDeque, hash_map::Entry},
     path::Path,
 };
 
@@ -322,6 +322,7 @@ fn reject_overlaps<S: AsRef<Path>, T: AsRef<Path>>(
     // validation. Borrow paths from the batch and discard this cache afterwards:
     // later preparation, conflict checks and execution must inspect afresh.
     let mut ancestor_keys = HashMap::new();
+    let mut marked_ancestors = HashSet::new();
     for (index, rename) in renames.iter().enumerate() {
         for (path, resolved) in [
             (rename.source.original().as_ref(), rename.source.resolved()),
@@ -347,13 +348,21 @@ fn reject_overlaps<S: AsRef<Path>, T: AsRef<Path>>(
                         }
                     },
                 };
-                if let Some(owners) = endpoints.get(key) {
+                if let Some((endpoint_key, owners)) = endpoints.get_key_value(key) {
                     let owners = owners.as_slice();
                     let owner = &renames[owners[0]];
                     let original = if owner.source.key() == Some(key) {
                         owner.source.original().as_ref()
                     } else {
                         owner.target.original().as_ref()
+                    };
+                    // An ancestor's owners only need marking once, even when
+                    // many descendants or alias spellings revisit this entry.
+                    // Still diagnose every descendant with its own original path.
+                    let owners = if marked_ancestors.insert(*endpoint_key) {
+                        owners
+                    } else {
+                        &[]
                     };
                     rejected.mark(
                         owners.iter().copied().chain([index]),

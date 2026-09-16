@@ -19,6 +19,7 @@ enum Scenario {
     DuplicateTargets,
     OccupiedTargets,
     OverlappingSources,
+    DuplicateOverlaps,
     Chain,
 }
 
@@ -33,6 +34,7 @@ impl Scenario {
             Self::DuplicateTargets => "duplicate-targets/shuffled",
             Self::OccupiedTargets => "occupied-targets/shuffled",
             Self::OverlappingSources => "overlapping-sources/shuffled",
+            Self::DuplicateOverlaps => "duplicate-overlaps/shuffled",
             Self::Chain => "chain/shuffled",
         }
     }
@@ -41,6 +43,7 @@ impl Scenario {
         match self {
             Self::DuplicateTargets | Self::OverlappingSources => count / 10 * 2,
             Self::OccupiedTargets => count / 10,
+            Self::DuplicateOverlaps => count,
             _ => 0,
         }
     }
@@ -66,6 +69,11 @@ impl Scenario {
                 ) | (
                     Self::OverlappingSources,
                     RejectionReason::Plan(PlanError::OverlappingPaths { .. })
+                ) | (
+                    Self::DuplicateOverlaps,
+                    RejectionReason::Plan(
+                        PlanError::DuplicateSource { .. } | PlanError::OverlappingPaths { .. }
+                    )
                 )
             ));
         }
@@ -89,6 +97,19 @@ impl Fixture {
         let library = root.join("library");
         fs::create_dir(&incoming).unwrap();
         fs::create_dir(&library).unwrap();
+        if matches!(scenario, Scenario::DuplicateOverlaps) {
+            let folder = incoming.join("folder");
+            fs::create_dir(&folder).unwrap();
+            let mut pairs = Vec::with_capacity(count);
+            for index in 0..count / 2 {
+                pairs.push((folder.clone(), library.join(format!("folder-{index}"))));
+                let child = folder.join(format!("file-{index}"));
+                fs::write(&child, []).unwrap();
+                pairs.push((child, library.join(format!("file-{index}"))));
+            }
+            shuffle(&mut pairs);
+            return Self { _dir: dir, pairs };
+        }
         let dispersed = matches!(
             scenario,
             Scenario::DispersedExisting | Scenario::DispersedMissing
@@ -213,6 +234,7 @@ fn main() {
             Scenario::DuplicateTargets,
             Scenario::OccupiedTargets,
             Scenario::OverlappingSources,
+            Scenario::DuplicateOverlaps,
             Scenario::Chain,
         ] {
             measure(count, scenario, count_allocations);
