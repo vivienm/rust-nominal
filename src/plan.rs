@@ -3,7 +3,7 @@ use std::{collections::HashSet, io, path::Path, vec};
 use crate::{
     error::{ApplyError, FsError},
     fsutil::{EntryKey, IdentifiedPath, target_conflicts},
-    operation::Rename,
+    operation::{Rename, apply_resolved},
     preparation::{Rejection, RejectionTracker},
 };
 
@@ -280,6 +280,8 @@ impl<S, T> Plan<S, T> {
     /// including one created after preparation. See [`Rename::apply`] for
     /// platform support. Paths and source identities are not locked against
     /// concurrent changes, and the batch as a whole is not atomic.
+    /// Execution uses the captured paths without resolving their parents again,
+    /// while checking destination occupancy against the current filesystem.
     ///
     /// Case-only changes may use a temporary name; see [`Rename::apply`]
     /// for visibility and recovery behavior during those operations.
@@ -383,8 +385,11 @@ impl<S, T> Iterator for ApplyIter<S, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let rename = self.iter.next()?;
-        let resolved = rename.resolved();
-        Some(match resolved.apply() {
+        let result = apply_resolved(
+            rename.source.identified.resolved(),
+            rename.target.identified.resolved(),
+        );
+        Some(match result {
             Ok(()) => Ok(rename.into_original()),
             Err(source) => Err(ApplyError {
                 source_path: rename.source.identified.into_resolved().into(),

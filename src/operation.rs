@@ -107,34 +107,42 @@ where
     pub fn apply(&self) -> Result<(), RenameError> {
         let source = ResolvedPath::new(&self.source)?;
         let target = ResolvedPath::new(&self.target)?;
-        let (source, target) = (source.as_path(), target.as_path());
-
-        match target_state(source, target)? {
-            TargetState::Conflict => return Err(RenameError::TargetExists),
-            TargetState::SameEntry
-                if source.file_name().is_some() && source.file_name() != target.file_name() =>
-            {
-                return rename_via_temporary(source, target, rename_to_free_target);
-            }
-            TargetState::SameEntry
-                if ends_with_entry_name(source) && ends_with_entry_name(target) =>
-            {
-                // Identical entry names (possibly through parent aliases) need
-                // no system rename. Keep suffix constraints out of this case.
-                return Ok(());
-            }
-            _ => {}
-        }
-
-        if let Some(target_parent) = target.parent()
-            && !target_parent.exists()
-        {
-            tracing::debug!("creating parent directory for {}", target.display());
-            fs::create_dir_all(target_parent)?;
-        }
-        tracing::debug!("renaming {} to {}", source.display(), target.display());
-        crate::noreplace::rename(source, target)
+        apply_resolved(&source, &target)
     }
+}
+
+/// Executes captured paths without resolving their parents again.
+/// Resolution does not pin directory entries: recheck destination occupancy
+/// against the current filesystem and refuse replacement at each rename.
+pub(crate) fn apply_resolved(
+    source: &ResolvedPath,
+    target: &ResolvedPath,
+) -> Result<(), RenameError> {
+    let (source, target) = (source.as_path(), target.as_path());
+
+    match target_state(source, target)? {
+        TargetState::Conflict => return Err(RenameError::TargetExists),
+        TargetState::SameEntry
+            if source.file_name().is_some() && source.file_name() != target.file_name() =>
+        {
+            return rename_via_temporary(source, target, rename_to_free_target);
+        }
+        TargetState::SameEntry if ends_with_entry_name(source) && ends_with_entry_name(target) => {
+            // Identical entry names (possibly through parent aliases) need
+            // no system rename. Keep suffix constraints out of this case.
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    if let Some(target_parent) = target.parent()
+        && !target_parent.exists()
+    {
+        tracing::debug!("creating parent directory for {}", target.display());
+        fs::create_dir_all(target_parent)?;
+    }
+    tracing::debug!("renaming {} to {}", source.display(), target.display());
+    crate::noreplace::rename(source, target)
 }
 
 /// Each stage rechecks occupancy, including when restoring the source.

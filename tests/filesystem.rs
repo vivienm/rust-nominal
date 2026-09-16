@@ -38,6 +38,33 @@ fn direct_rename_resolves_existing_parents_and_creates_missing_destinations() {
     );
 }
 
+#[test]
+fn prepared_execution_handles_removed_or_blocked_target_parents() {
+    for blocked in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let parent = dir.path().join("parent");
+        let target = parent.join("target");
+        fs::write(&source, "contents").unwrap();
+        fs::create_dir(&parent).unwrap();
+        let plan = Renamer::from_iter([(&source, &target)])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        fs::remove_dir(&parent).unwrap();
+        if blocked {
+            fs::write(&parent, "blocking file").unwrap();
+            assert!(plan.apply().is_err());
+            assert_eq!(fs::read_to_string(&source).unwrap(), "contents");
+            assert_eq!(fs::read_to_string(&parent).unwrap(), "blocking file");
+        } else {
+            plan.apply().unwrap();
+            assert_eq!(fs::read_to_string(&target).unwrap(), "contents");
+            assert!(!source.exists());
+        }
+    }
+}
+
 fn assert_conflict(source: &Path, target: &Path) {
     let report = Renamer::from_iter([(source, target)]).prepare();
     assert_eq!(
@@ -110,6 +137,100 @@ mod unix {
         fs::{PermissionsExt, symlink},
         net::UnixListener,
     };
+
+    #[test]
+    fn prepared_execution_keeps_captured_paths_when_original_alias_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name| dir.path().join(name);
+        fs::create_dir(p("original")).unwrap();
+        fs::create_dir(p("alternate")).unwrap();
+        fs::write(p("original/source"), "planned contents").unwrap();
+        fs::write(p("alternate/source"), "unrelated contents").unwrap();
+        symlink("original", p("alias")).unwrap();
+        let plan = Renamer::from_iter([(p("alias/source"), p("alias/target"))])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        fs::remove_file(p("alias")).unwrap();
+        symlink("alternate", p("alias")).unwrap();
+
+        plan.apply().unwrap();
+
+        assert!(!p("original/source").exists());
+        assert_eq!(
+            fs::read_to_string(p("original/target")).unwrap(),
+            "planned contents"
+        );
+        assert_eq!(
+            fs::read_to_string(p("alternate/source")).unwrap(),
+            "unrelated contents"
+        );
+        assert!(!p("alternate/target").exists());
+    }
+
+    #[test]
+    fn prepared_execution_rechecks_entries_when_captured_parent_becomes_a_symlink() {
+        for occupied in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = |name| dir.path().join(name);
+            fs::create_dir(p("parent")).unwrap();
+            fs::create_dir(p("replacement")).unwrap();
+            fs::write(p("parent/source"), "original contents").unwrap();
+            fs::write(p("replacement/source"), "current contents").unwrap();
+            let plan = Renamer::from_iter([(p("parent/source"), p("parent/target"))])
+                .prepare()
+                .into_plan()
+                .unwrap();
+            fs::rename(p("parent"), p("saved")).unwrap();
+            symlink("replacement", p("parent")).unwrap();
+
+            if occupied {
+                fs::write(p("replacement/target"), "keep me").unwrap();
+                assert!(matches!(
+                    plan.apply().unwrap_err().source,
+                    RenameError::TargetExists
+                ));
+                assert_eq!(
+                    fs::read_to_string(p("replacement/target")).unwrap(),
+                    "keep me"
+                );
+                assert_eq!(
+                    fs::read_to_string(p("replacement/source")).unwrap(),
+                    "current contents"
+                );
+            } else {
+                // Captured spellings do not pin directories or source identities.
+                plan.apply().unwrap();
+                assert_eq!(
+                    fs::read_to_string(p("replacement/target")).unwrap(),
+                    "current contents"
+                );
+                assert!(!p("replacement/source").exists());
+            }
+            assert_eq!(
+                fs::read_to_string(p("saved/source")).unwrap(),
+                "original contents"
+            );
+            assert!(!p("saved/target").exists());
+        }
+    }
+
+    #[test]
+    fn prepared_execution_preserves_a_new_dangling_parent_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = |name| dir.path().join(name);
+        fs::write(p("source"), "contents").unwrap();
+        let plan = Renamer::from_iter([(p("source"), p("parent/target"))])
+            .prepare()
+            .into_plan()
+            .unwrap();
+        symlink("missing", p("parent")).unwrap();
+
+        assert!(plan.apply().is_err());
+        assert_eq!(fs::read_to_string(p("source")).unwrap(), "contents");
+        assert_eq!(fs::read_link(p("parent")).unwrap(), Path::new("missing"));
+        assert!(!p("missing").exists());
+    }
 
     #[test]
     fn dangling_source_cannot_overwrite_a_file() {

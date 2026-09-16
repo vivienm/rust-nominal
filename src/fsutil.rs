@@ -11,6 +11,8 @@ pub fn common_ancestor<'a>(path_1: &'a Path, path_2: &'a Path) -> Option<&'a Pat
 }
 
 /// A path whose parents have been resolved, preserving the final entry spelling.
+/// This captures a spelling, not an open handle: directories can still change
+/// before execution, and filesystem operations will observe their current state.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedPath(PathBuf);
 
@@ -127,6 +129,10 @@ impl IdentifiedPath {
 
     pub(crate) fn key(&self) -> &EntryKey {
         &self.key
+    }
+
+    pub(crate) fn resolved(&self) -> &ResolvedPath {
+        &self.resolved
     }
 
     pub(crate) fn into_resolved(self) -> ResolvedPath {
